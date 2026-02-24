@@ -1,61 +1,95 @@
-# discord_manager.py
+"""Discord Class Wrapper for discord.py"""
 import re
-import discord
 from collections import defaultdict
+import discord
+from utils import write_to_file
 
 
 class DiscordManager(discord.Client):
-    def __init__(self, spotify_manager, target_channel, user_id, **options):
+    """Discord Manager Class
+
+    built around discord.py
+    """
+    def __init__(
+        self, spotify_manager, target_channel, guild_id, user_id, logger, **options
+    ):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, **options)
 
         self.spotify_manager = spotify_manager
         self.target_channel = target_channel
+        self.guild_id = int(guild_id)
         self.user_id = user_id
         self.user_tracks = defaultdict(list)
-        self.spotify_url_pattern = re.compile(
-            r"https://open\.spotify\.com/track/([a-zA-Z0-9]+)"
+        self.logger = logger
+        self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
+
+        self.tree = discord.app_commands.CommandTree(self)
+
+    async def setup_hook(self) -> None:
+        """Registers to the guild and updates the command list"""
+        guild = discord.Object(id=self.guild_id)
+
+        # register command manually
+        @self.tree.command(
+            name="gather_spotify", description="Collect Spotify URLs", guild=guild
+        )
+        async def gather_spotify(
+            interaction: discord.Interaction, limit: int | None = None
+        ):
+            await self._gather_spotify(interaction, limit)
+
+        # sync
+        synced = await self.tree.sync(guild=guild)
+        self.logger.info(f"Synced commands: {[s.name for s in synced]}")
+        self.logger.info(f"Guild ID used: {self.guild_id}")
+
+    async def on_ready(self) -> None:
+        """Signals that the connection to discord is good"""
+        self.logger.info(f"Connected guilds: {[g.id for g in self.guilds]}")
+
+    async def _gather_spotify(
+        self, interaction: discord.Interaction, limit: int | None
+    ):
+        """Internal logic for scanning Spotify URLs
+
+        Args:
+            interaction (discord.Interaction): interaction type
+            limit (int | None): limit of messages to search
+        """
+        channel = interaction.channel
+        spotify_urls = set()
+
+        self.logger.info(
+            f"Scanning channel '{channel}' (ID: {channel.id}) for Spotify URLs. Limit={limit}"
         )
 
-    async def on_ready(self):
-        print(f"Logged in as {self.user}")
+        # Scan channel history
+        async for message in channel.history(limit=limit):
+            matches = self.spotify_url_pattern.findall(message.content)
+            for url in matches:
+                spotify_urls.add(url)
 
-    async def on_message(self, message):
-        print(f"on_message: {message}")
-        if message.author == self.user:
+        if not spotify_urls:
+            self.logger.info("No Spotify URLs found.")
+            await interaction.followup.send("No Spotify URLs found in this channel.")
             return
 
-        if message.channel.name != self.target_channel:
-            return
+        # Deduplicate and sort
+        url_list = sorted(spotify_urls)
+        self.logger.info(f"Found {len(url_list)} Spotify URLs.")
 
-        matches = self.spotify_url_pattern.findall(message.content)
-        print(matches)
-        for track_id in matches:
-            track_info = self.spotify_manager.get_track_info(track_id)
-            self.user_tracks[message.author.name].append(track_info)
+        # Write to file
+        write_to_file(url_list)
 
-        # Check for the finalize command
-        if message.content.strip() == "!finalize_playlist":
-            print(f"Finalizing playlist...")
-            await self.finalize_playlist(message.channel)
+        # Chunk into groups of 10
+        chunk_size = 10
+        chunks = [
+            url_list[i : i + chunk_size] for i in range(0, len(url_list), chunk_size)
+        ]
 
-    async def finalize_playlist(self, channel):
-        playlist_name = "Discord Collab Playlist"
-        playlist_id = self.spotify_manager.create_playlist(self.user_id, playlist_name)
+        for chunk in chunks:
+            await interaction.followup.send("\n".join(chunk))
 
-        all_track_ids = []
-        for tracks in self.user_tracks.values():
-            for track in tracks:
-                all_track_ids.append(track["track_id"])
-
-        self.spotify_manager.add_tracks_to_playlist(playlist_id, all_track_ids)
-
-        # Create stats
-        stats = "\n".join(
-            [
-                f"{user}: {len(tracks)} tracks"
-                for user, tracks in self.user_tracks.items()
-            ]
-        )
-        await channel.send(f"Playlist created! Here's the contribution stats:\n{stats}")
+        self.logger.info("Finished sending Spotify URL results.")
