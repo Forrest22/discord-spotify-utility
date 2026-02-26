@@ -4,7 +4,8 @@ from spotipy.oauth2 import SpotifyOAuth
 
 
 class SpotifyManager:
-    """Wrapper Class for using spotipy
+    """
+    Wrapper class for using spotipy
     """
     def __init__(self, client_id, client_secret, redirect_uri):
         self.sp = spotipy.Spotify(
@@ -37,16 +38,17 @@ class SpotifyManager:
         }
 
     def create_playlist(self, user_id, name, description="") -> str | None:
-        """Creates a playlist
+        """Creates a playlist, returns its ID
 
         Args:
-            user_id (_type_): _description_
-            name (_type_): _description_
-            description (str, optional): _description_. Defaults to "".
+            user_id (_type_): User ID
+            name (_type_): Name of playlist
+            description (str, optional): Description of playlist. Defaults to "".
 
         Returns:
-            _type_: _description_
+            _type_: Playlist ID
         """
+        print(type(user_id),type(name),type(description))
         playlist = self.sp.user_playlist_create(
             user=user_id, name=name, description=description
         )

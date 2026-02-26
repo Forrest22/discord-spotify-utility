@@ -6,3 +6,5 @@ venv/
 my-venv/
 .cache
 *.log
+output.txt
+*.dsm

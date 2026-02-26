@@ -1,17 +1,18 @@
-"""Discord Class Wrapper for discord.py"""
+"""class wrapper for discord.py"""
 import re
 from collections import defaultdict
 import discord
-from utils import write_to_file
+from utils import write_list_to_file
+from spotify_manager import SpotifyManager
 
 
 class DiscordManager(discord.Client):
-    """Discord Manager Class
-
+    """
+    discord.py wrapper class
     built around discord.py
     """
     def __init__(
-        self, spotify_manager, target_channel, guild_id, user_id, logger, **options
+        self, spotify_manager: SpotifyManager, target_channel, guild_id, user_id, logger, **options
     ):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -31,13 +32,23 @@ class DiscordManager(discord.Client):
         """Registers to the guild and updates the command list"""
         guild = discord.Object(id=self.guild_id)
 
-        # register command manually
+        # register command manually in local tree scope
         @self.tree.command(
-            name="gather_spotify", description="Collect Spotify URLs", guild=guild
+            name="help",
+            description="Shows all available commands",
+            guild=guild
+        )
+        async def help_command(interaction: discord.Interaction) -> None:
+            await self._help_command(interaction)
+
+        @self.tree.command(
+            name="gather_spotify",
+            description="Collect Spotify URLs and create a playlist",
+            guild=guild
         )
         async def gather_spotify(
             interaction: discord.Interaction, limit: int | None = None
-        ):
+        ) -> None:
             await self._gather_spotify(interaction, limit)
 
         # sync
@@ -49,15 +60,47 @@ class DiscordManager(discord.Client):
         """Signals that the connection to discord is good"""
         self.logger.info(f"Connected guilds: {[g.id for g in self.guilds]}")
 
+    async def _help_command(self, interaction: discord.Interaction) -> None:
+        """Help Command
+
+        Args:
+            interaction (discord.Interaction): discord interaction
+        """
+        embed = discord.Embed(
+            title="Bot Commands",
+            description="Here are the available commands:",
+            color=discord.Color.blurple()
+        )
+
+        embed.add_field(
+            name="/gather_spotify",
+            value="Collect Spotify URLs into a singular playlist. "
+            + "Collects spotify tracks, albums, and playlists. "
+            + "Then stores said songs and playlist for later. "
+            + "Necessary first step in many commands.",
+            inline=False
+        )
+
+        embed.add_field(
+            name="/help",
+            value="Shows this help message",
+            inline=False
+        )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     async def _gather_spotify(
         self, interaction: discord.Interaction, limit: int | None
-    ):
+    ) -> None:
         """Internal logic for scanning Spotify URLs
 
         Args:
             interaction (discord.Interaction): interaction type
             limit (int | None): limit of messages to search
         """
+        # Prevents webhook timeouts on large requests
+        await interaction.response.defer()
+
         channel = interaction.channel
         spotify_urls = set()
 
@@ -80,16 +123,11 @@ class DiscordManager(discord.Client):
         url_list = sorted(spotify_urls)
         self.logger.info(f"Found {len(url_list)} Spotify URLs.")
 
-        # Write to file
-        write_to_file(url_list)
+        # Write to file, using the user.id to store info for other commands
+        write_list_to_file(url_list, str(interaction.user.id) + ".dsm")
 
-        # Chunk into groups of 10
-        chunk_size = 10
-        chunks = [
-            url_list[i : i + chunk_size] for i in range(0, len(url_list), chunk_size)
-        ]
+        self.spotify_manager.create_playlist()
 
-        for chunk in chunks:
-            await interaction.followup.send("\n".join(chunk))
-
-        self.logger.info("Finished sending Spotify URL results.")
+        self.logger.info("Finished sending Spotify URL results, written to disk.")
+        
+        
