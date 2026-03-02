@@ -6,24 +6,35 @@ from utils import write_list_to_file
 from spotify_manager import SpotifyManager
 
 
+class DiscordManagerSettings:
+    """DiscordManagerSettings
+    Different settings for initializing DiscordManager
+    """
+    def __init__(self, target_channel, guild_id, user_id, logger, **options):
+        self.target_channel = target_channel
+        self.guild_id = int(guild_id)
+        self.user_id = user_id
+        self.logger = logger
+        self.options = options
+
 class DiscordManager(discord.Client):
     """
     discord.py wrapper class
     built around discord.py
     """
     def __init__(
-        self, spotify_manager: SpotifyManager, target_channel, guild_id, user_id, logger, **options
+        self, spotify_manager: SpotifyManager, discord_settings: DiscordManagerSettings
     ):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(intents=intents, **options)
+        super().__init__(intents=intents, **discord_settings.options)
 
         self.spotify_manager = spotify_manager
-        self.target_channel = target_channel
-        self.guild_id = int(guild_id)
-        self.user_id = user_id
+        self.target_channel = discord_settings.target_channel
+        self.guild_id = int(discord_settings.guild_id)
+        self.user_id = discord_settings.user_id
         self.user_tracks = defaultdict(list)
-        self.logger = logger
+        self.logger = discord_settings.logger
         self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
 
         self.tree = discord.app_commands.CommandTree(self)
@@ -129,5 +140,3 @@ class DiscordManager(discord.Client):
         self.spotify_manager.create_playlist()
 
         self.logger.info("Finished sending Spotify URL results, written to disk.")
-        
-        

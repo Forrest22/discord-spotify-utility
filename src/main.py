@@ -7,7 +7,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from spotify_manager import SpotifyManager
-from discord_manager import DiscordManager
+from discord_manager import DiscordManager, DiscordManagerSettings
 
 # --- Load environment variables ---
 load_dotenv()
@@ -37,15 +37,16 @@ spotify_manager = SpotifyManager(
     client_id=SPOTIFY_CLIENT_ID,
     client_secret=SPOTIFY_CLIENT_SECRET,
     redirect_uri=SPOTIFY_REDIRECT_URI,
-    # logger=logger,
 )
 
 discord_manager = DiscordManager(
     spotify_manager=spotify_manager,
-    target_channel=TARGET_CHANNEL_NAME,
-    guild_id=GUILD_ID,
-    user_id=SPOTIFY_USER_ID,
-    logger=logger,
+    discord_settings=DiscordManagerSettings(
+        target_channel=TARGET_CHANNEL_NAME,
+        guild_id=GUILD_ID,
+        user_id=SPOTIFY_USER_ID,
+        logger=logger
+    ),
 )
 
 # --- Run Discord bot ---
