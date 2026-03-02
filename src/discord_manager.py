@@ -1,4 +1,5 @@
 """class wrapper for discord.py"""
+import asyncio
 import re
 from dataclasses import dataclass, field
 from logging import Logger
@@ -102,52 +103,65 @@ class DiscordManager(discord.Client):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _create_spotify_playlist(
-        self, interaction: discord.Interaction, limit: int | None
+        self, interaction: discord.Interaction, limit: int | None = 1000
     ) -> None:
         """Internal logic for scanning Spotify URLs in the specified channel
         and collects them into a playlist.
 
         Args:
             interaction (discord.Interaction): interaction type
-            limit (int | None): limit of messages to search
+            limit (int | None): limit of messages to search. Defaults to 1000.
         """
         # Prevents webhook timeouts on large requests
         await interaction.response.defer()
-
         channel = interaction.channel
         spotify_urls = set()
-
         self.logger.info(
             f"Scanning channel '{channel}' (ID: {channel.id}) for Spotify URLs. Limit={limit}"
         )
 
-        # Scan channel history
+        message_count = 0
         async for message in channel.history(limit=limit):
             matches = self.spotify_url_pattern.findall(message.content)
             for url in matches:
                 spotify_urls.add(remove_query_params(url))
+
+            message_count += 1
+            if message_count % 100 == 0:
+                self.logger.info(f"Scanned {message_count} messages, "
+                                 f"found {len(spotify_urls)} URLs so far...")
+                await asyncio.sleep(1)
 
         if not spotify_urls:
             self.logger.info("No Spotify URLs found.")
             await interaction.followup.send("No Spotify URLs found in this channel.")
             return
 
-        # Write to file, using the user.id to store info for other commands
         write_list_to_file(spotify_urls, str(interaction.user.id) + ".dsm")
 
         playlist_name = f"{interaction.guild.name} jams | DSU"
         playlist_description = (
             f"Spotify jams discord server {interaction.guild.name} compiled from "
             f"#{interaction.channel.name} at "
-            f"{datetime.today().strftime("%Y-%m-%d")}. "
+            f"{datetime.today().strftime('%Y-%m-%d')}. "
             f"Created using discord-spotify-utility. "
             "https://github.com/Forrest22/discord-spotify-utility"
         )
-        playlist = self.spotify_manager.create_playlist(playlist_name, playlist_description)
-        self.logger.info(f"Created playlist: {playlist["external_urls"]["spotify"]}")
 
-        self.spotify_manager.add_tracks_to_playlist(playlist["id"], spotify_urls)
+        loop = asyncio.get_event_loop()
 
-        await interaction.followup.send(f"Finished compiling playlist: "
-                                        f"{playlist["external_urls"]["spotify"]}")
+        # Run blocking Spotify calls in a thread executor
+        playlist = await loop.run_in_executor(
+            None, self.spotify_manager.create_playlist, playlist_name, playlist_description
+        )
+
+        await loop.run_in_executor(
+            None, self.spotify_manager.add_tracks_to_playlist, playlist["id"], spotify_urls
+        )
+
+        await interaction.followup.send(
+            f"Finished compiling playlist: {playlist['external_urls']['spotify']}"
+        )
+        self.logger.info(f"Created playlist: {playlist['external_urls']['spotify']}")
+
 

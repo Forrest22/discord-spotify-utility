@@ -90,15 +90,6 @@ class SpotifyManager:
             self.spotipy.playlist_add_items(playlist_id, list(track_uris)[i:i + 100])
 
     def _get_deduped_track_uris_from_urls(self, track_urls: List[str]) -> Set[str]:
-        """Get a list of track URIs from given URLs and returns a deduplicated
-        list of URIs to add to playlist. Accepts track, album, and playlist URLs.
-
-        Args:
-            track_urls (List[str]): track URLs (from discord server/channel)
-
-        Returns:
-            Set[str]: deduplicated list of track URIs from given URLs
-        """
         track_uris = set()
 
         for item in track_urls:
@@ -110,23 +101,33 @@ class SpotifyManager:
                 album_id = item.split("album/")[-1].split("?")[0] if "album/" in item else item
                 results = self.spotipy.album_tracks(album_id)
                 for t in results["items"]:
-                    track_uris.add(t["uri"])
+                    if t["uri"].startswith("spotify:track:"):
+                        track_uris.add(t["uri"])
 
                 while results["next"]:
                     results = self.spotipy.next(results)
                     for t in results["items"]:
-                        track_uris.add(t["uri"])
+                        if t["uri"].startswith("spotify:track:"):
+                            track_uris.add(t["uri"])
 
             elif "playlist" in item:
                 pl_id = item.split("playlist/")[-1].split("?")[0] if "playlist/" in item else item
-                results = self.spotipy.playlist_items(pl_id)
-                for t in results["items"]:
-                    if t["track"]:
-                        track_uris.add(t["track"]["uri"])
-
-                while results["next"]:
-                    results = self.spotipy.next(results)
+                try:
+                    results = self.spotipy.playlist_items(pl_id)
                     for t in results["items"]:
-                        if t["track"]:
+                        if t["track"] and t["track"]["uri"].startswith("spotify:track:"):
                             track_uris.add(t["track"]["uri"])
+
+                    while results["next"]:
+                        results = self.spotipy.next(results)
+                        for t in results["items"]:
+                            if t["track"] and t["track"]["uri"].startswith("spotify:track:"):
+                                track_uris.add(t["track"]["uri"])
+
+                except spotipy.SpotifyException as e:
+                    if e.http_status == 404:
+                        self.logger.warning(f"Skipping inaccessible playlist {pl_id}: {e}")
+                    else:
+                        raise
+
         return track_uris

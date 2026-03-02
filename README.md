@@ -16,4 +16,4 @@ This is a Discord Bot for use in discord channels with music bots. Its goal is t
 
 `venv/bin/pip install <LIBRARY>` to add a lib
 
-`python3 $(which pylint) src` to run pylint
+`python3 $(which pylint) src` to run pylint using venv
