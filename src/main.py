@@ -20,7 +20,7 @@ SPOTIFY_USER_ID = getenv("SPOTIFY_USER_ID")
 
 DISCORD_BOT_TOKEN = getenv("DISCORD_BOT_TOKEN")
 TARGET_CHANNEL_NAME = getenv("TARGET_CHANNEL_NAME")
-GUILD_ID = getenv("GUILD_ID")
+GUILD_IDS = [int(id) for id in getenv("GUILD_IDS").split(",")]
 
 LOGGING_FORMAT = getenv("LOGGING_FORMAT")
 DATE_FORMAT = getenv("DATE_FORMAT")
@@ -46,7 +46,7 @@ discord_manager = DiscordManager(
     spotify_manager=spotify_manager,
     discord_settings=DiscordManagerSettings(
         target_channel=TARGET_CHANNEL_NAME,
-        guild_id=GUILD_ID,
+        guild_ids=GUILD_IDS,
         user_id=SPOTIFY_USER_ID,
         logger=logger
     )

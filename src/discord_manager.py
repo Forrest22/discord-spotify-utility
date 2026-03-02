@@ -2,7 +2,7 @@
 import re
 from dataclasses import dataclass, field
 from logging import Logger
-from typing import Any
+from typing import List, Any
 from datetime import datetime
 import discord
 from utils import write_list_to_file, remove_query_params
@@ -12,7 +12,7 @@ from spotify_manager import SpotifyManager
 class DiscordManagerSettings:
     """Different settings for initializing DiscordManager"""
     target_channel: str
-    guild_id: int
+    guild_ids: List[int]
     user_id: str
     logger: Logger
     options: dict[str, Any] = field(default_factory=dict)
@@ -31,7 +31,7 @@ class DiscordManager(discord.Client):
 
         self.spotify_manager = spotify_manager
         self.target_channel = discord_settings.target_channel
-        self.guild_id = int(discord_settings.guild_id)
+        self.guild_ids = discord_settings.guild_ids
         self.user_id = discord_settings.user_id
 
         self.logger = discord_settings.logger
@@ -41,31 +41,32 @@ class DiscordManager(discord.Client):
 
     async def setup_hook(self) -> None:
         """Registers to the guild and updates the command list"""
-        guild = discord.Object(id=self.guild_id)
+        for guild_id in self.guild_ids:
+            guild = discord.Object(id=guild_id)
 
-        # register command manually in local tree scope
-        @self.tree.command(
-            name="help",
-            description="Shows all available commands",
-            guild=guild
-        )
-        async def help_command(interaction: discord.Interaction) -> None:
-            await self._help_command(interaction)
+            # register command manually in local tree scope
+            @self.tree.command(
+                name="help",
+                description="Shows all available commands",
+                guild=guild
+            )
+            async def help_command(interaction: discord.Interaction) -> None:
+                await self._help_command(interaction)
 
-        @self.tree.command(
-            name="create_spotify_playlist",
-            description="Collect Spotify URLs and create a playlist",
-            guild=guild
-        )
-        async def create_spotify_playlist(
-            interaction: discord.Interaction, limit: int | None = None
-        ) -> None:
-            await self._create_spotify_playlist(interaction, limit)
+            @self.tree.command(
+                name="create_spotify_playlist",
+                description="Collect Spotify URLs and create a playlist",
+                guild=guild
+            )
+            async def create_spotify_playlist(
+                interaction: discord.Interaction, limit: int | None = None
+            ) -> None:
+                await self._create_spotify_playlist(interaction, limit)
 
-        # sync
-        synced = await self.tree.sync(guild=guild)
+            # sync
+            synced = await self.tree.sync(guild=guild)
         self.logger.info(f"Synced commands: {[s.name for s in synced]}")
-        self.logger.info(f"Guild ID used: {self.guild_id}")
+        self.logger.info(f"Guild IDs used: {self.guild_ids}")
 
     async def on_ready(self) -> None:
         """Signals that the connection to discord is good"""
@@ -134,12 +135,13 @@ class DiscordManager(discord.Client):
         # Write to file, using the user.id to store info for other commands
         write_list_to_file(spotify_urls, str(interaction.user.id) + ".dsm")
 
-        playlist_name = f"Spotify jams from {self.get_guild(self.guild_id).name}"
+        playlist_name = f"{interaction.guild.name} jams | DSU"
         playlist_description = (
-            f"Spotify jams from #{self.target_channel} in "
-            f"{self.get_guild(self.guild_id).name} from "
+            f"Spotify jams discord server {interaction.guild.name} compiled from "
+            f"#{interaction.channel.name} at "
             f"{datetime.today().strftime("%Y-%m-%d")}. "
-            f"Created using discord-spotify-utility."
+            f"Created using discord-spotify-utility. "
+            "https://github.com/Forrest22/discord-spotify-utility"
         )
         playlist = self.spotify_manager.create_playlist(playlist_name, playlist_description)
         self.logger.info(f"Created playlist: {playlist["external_urls"]["spotify"]}")
@@ -149,5 +151,3 @@ class DiscordManager(discord.Client):
         await interaction.followup.send(f"Finished compiling playlist: "
                                         f"{playlist["external_urls"]["spotify"]}")
 
-        self.logger.info(f"Finished sending Spotify URL results, written to disk. "
-                         f"Playlist URL: {playlist["external_urls"]["spotify"]}")
