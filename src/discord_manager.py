@@ -33,7 +33,7 @@ class DiscordManager(discord.Client):
         self.target_channel = discord_settings.target_channel
         self.guild_id = int(discord_settings.guild_id)
         self.user_id = discord_settings.user_id
-        
+
         self.logger = discord_settings.logger
         self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
 
@@ -135,12 +135,19 @@ class DiscordManager(discord.Client):
         write_list_to_file(spotify_urls, str(interaction.user.id) + ".dsm")
 
         playlist_name = f"Spotify jams from {self.get_guild(self.guild_id).name}"
-        playlist_description = f"Spotify jams from #{self.target_channel} in {self.get_guild(self.guild_id).name} from {datetime.today().strftime("%Y-%m-%d")}. Created using discord-spotify-utility."
+        playlist_description = (
+            f"Spotify jams from #{self.target_channel} in "
+            f"{self.get_guild(self.guild_id).name} from "
+            f"{datetime.today().strftime("%Y-%m-%d")}. "
+            f"Created using discord-spotify-utility."
+        )
         playlist = self.spotify_manager.create_playlist(playlist_name, playlist_description)
         self.logger.info(f"Created playlist: {playlist["external_urls"]["spotify"]}")
 
         self.spotify_manager.add_tracks_to_playlist(playlist["id"], spotify_urls)
-        
-        await interaction.followup.send(f"Finished compiling playlist: {playlist["external_urls"]["spotify"]}")
 
-        self.logger.info(f"Finished sending Spotify URL results, written to disk. Playlist URL: {playlist["external_urls"]["spotify"]}")
+        await interaction.followup.send(f"Finished compiling playlist: "
+                                        f"{playlist["external_urls"]["spotify"]}")
+
+        self.logger.info(f"Finished sending Spotify URL results, written to disk. "
+                         f"Playlist URL: {playlist["external_urls"]["spotify"]}")

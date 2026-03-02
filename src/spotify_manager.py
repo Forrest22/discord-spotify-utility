@@ -1,8 +1,7 @@
 """Wrapper Class for using spotipy"""
 from dataclasses import dataclass
 from logging import Logger
-from typing import List, Any
-from collections import defaultdict
+from typing import List, Any, Set
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
@@ -70,20 +69,39 @@ class SpotifyManager:
             Any | None: Playlist object
         """
         playlist = self.spotipy.user_playlist_create(
-            user=self.spotipy.current_user()["id"], name=name, public=True, collaborative=False, description=description
+            user=self.spotipy.current_user()["id"],
+            name=name,
+            public=True,
+            collaborative=False,
+            description=description
         )
         return playlist
 
-    def add_tracks_to_playlist(self, playlist_id: str, track_ids: List[str]) -> None:
+    def add_tracks_to_playlist(self, playlist_id: str, track_urls: List[str]) -> None:
         """Adds a number of track ids to a playlist, supports track, album, and playlist links.
         
         Args:
             playlist_id (str): id of the playlist
-            track_ids (List[str]): list of track/album/playlist ids or URLs
+            track_urls (List[str]): list of track/album/playlist URLs
+        """
+        track_uris = self._get_deduped_track_uris_from_urls(track_urls)
+
+        for i in range(0, len(track_uris), 100):
+            self.spotipy.playlist_add_items(playlist_id, list(track_uris)[i:i + 100])
+
+    def _get_deduped_track_uris_from_urls(self, track_urls: List[str]) -> Set[str]:
+        """Get a list of track URIs from given URLs and returns a deduplicated
+        list of URIs to add to playlist. Accepts track, album, and playlist URLs.
+
+        Args:
+            track_urls (List[str]): track URLs (from discord server/channel)
+
+        Returns:
+            Set[str]: deduplicated list of track URIs from given URLs
         """
         track_uris = set()
 
-        for item in track_ids:
+        for item in track_urls:
             if "track" in item:
                 track_id = item.split("track/")[-1].split("?")[0]
                 track_uris.add(f"spotify:track:{track_id}")
@@ -111,6 +129,4 @@ class SpotifyManager:
                     for t in results["items"]:
                         if t["track"]:
                             track_uris.add(t["track"]["uri"])
-
-        for i in range(0, len(track_uris), 100):
-            self.spotipy.playlist_add_items(playlist_id, list(track_uris)[i:i + 100])
+        return track_uris
