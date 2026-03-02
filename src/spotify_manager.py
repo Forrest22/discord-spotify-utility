@@ -7,7 +7,7 @@ from spotipy.oauth2 import SpotifyOAuth
 
 @dataclass
 class SpotifyManagerSettings:
-    """SpotifyManagerSettings
+    """
     Different settings for initializing SpotifyManager
     """
     client_id: str
