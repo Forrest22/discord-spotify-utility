@@ -1,6 +1,6 @@
 """Wrapper Class for using spotipy"""
 from dataclasses import dataclass
-from logging import Logger
+import logging
 from typing import List, Any, Set
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -13,14 +13,13 @@ class SpotifyManagerSettings:
     client_id: str
     client_secret: str
     redirect_uri: str
-    logger: Logger
 
 class SpotifyManager:
     """
     Wrapper class for using spotipy
     """
     def __init__(self, settings: SpotifyManagerSettings):
-        self.logger=settings.logger
+        self.logger = logging.getLogger("discord-spotify-util.spotify")
         self.spotipy = spotipy.Spotify(
             auth_manager=SpotifyOAuth(
                 client_id=settings.client_id,
@@ -29,28 +28,8 @@ class SpotifyManager:
                 scope="playlist-modify-public"
             )
         )
-        self.logger.info("Spotify client connected as "
-                         + f"{self.spotipy.current_user()["display_name"]}.")
-
-    def get_track_info(self, track_id):
-        """Gets the track info from spotify
-
-        Args:
-            track_id (_type_): track to get info about
-
-        Returns:
-            {
-                "artist_name": str,
-                "track_name": str,
-                "track_id": str,
-            }
-        """
-        track_info = self.spotipy.track(track_id)
-        return {
-            "artist_name": track_info["artists"][0]["name"],
-            "track_name": track_info["name"],
-            "track_id": track_info["id"],
-        }
+        self.logger.info("Spotify client connected as %s",
+                         self.spotipy.current_user()["display_name"])
 
     def create_playlist(
             self,
@@ -126,7 +105,7 @@ class SpotifyManager:
 
                 except spotipy.SpotifyException as e:
                     if e.http_status == 404:
-                        self.logger.warning(f"Skipping inaccessible playlist {pl_id}: {e}")
+                        self.logger.warning("Skipping inaccessible playlist %s: %s", pl_id, e)
                     else:
                         raise
 

@@ -5,6 +5,7 @@
 """
 from os import getenv
 import logging
+import discord
 from dotenv import load_dotenv
 from spotify_manager import SpotifyManager, SpotifyManagerSettings
 from discord_manager import DiscordManager, DiscordManagerSettings
@@ -26,11 +27,16 @@ LOGGING_FORMAT = getenv("LOGGING_FORMAT")
 DATE_FORMAT = getenv("DATE_FORMAT")
 
 # --- Initialize logging ---
-logging.basicConfig(level=logging.INFO, format=LOGGING_FORMAT, datefmt=DATE_FORMAT)
-logger = logging.getLogger("discord-spotify-util")
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
 log_handler = logging.FileHandler(
     filename="discord-spotify-util.log", encoding="utf-8", mode="w"
 )
+log_handler.setFormatter(logging.Formatter(fmt=LOGGING_FORMAT, datefmt=DATE_FORMAT))
+root_logger.addHandler(log_handler)
+
+discord.utils.setup_logging(handler=log_handler, level=logging.INFO)
 
 # --- Initialize managers ---
 spotify_manager = SpotifyManager(
@@ -38,7 +44,6 @@ spotify_manager = SpotifyManager(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
         redirect_uri=SPOTIFY_REDIRECT_URI,
-        logger=logger
     )
 )
 
@@ -48,7 +53,6 @@ discord_manager = DiscordManager(
         target_channel=TARGET_CHANNEL_NAME,
         guild_ids=GUILD_IDS,
         user_id=SPOTIFY_USER_ID,
-        logger=logger
     )
 )
 

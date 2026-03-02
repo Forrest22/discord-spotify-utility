@@ -1,8 +1,8 @@
 """class wrapper for discord.py"""
 import asyncio
+import logging
 import re
 from dataclasses import dataclass, field
-from logging import Logger
 from typing import List, Any
 from datetime import datetime
 import discord
@@ -15,7 +15,6 @@ class DiscordManagerSettings:
     target_channel: str
     guild_ids: List[int]
     user_id: str
-    logger: Logger
     options: dict[str, Any] = field(default_factory=dict)
 
 class DiscordManager(discord.Client):
@@ -32,46 +31,44 @@ class DiscordManager(discord.Client):
 
         self.spotify_manager = spotify_manager
         self.target_channel = discord_settings.target_channel
-        self.guild_ids = discord_settings.guild_ids
+        self.discord_guilds = [
+            discord.Object(id=guild_id) for guild_id in discord_settings.guild_ids
+        ]
         self.user_id = discord_settings.user_id
 
-        self.logger = discord_settings.logger
+        self.logger = logging.getLogger("discord-spotify-util.discord")
         self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
 
         self.tree = discord.app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
         """Registers to the guild and updates the command list"""
-        for guild_id in self.guild_ids:
-            guild = discord.Object(id=guild_id)
 
-            # register command manually in local tree scope
-            @self.tree.command(
-                name="help",
-                description="Shows all available commands",
-                guild=guild
-            )
-            async def help_command(interaction: discord.Interaction) -> None:
-                await self._help_command(interaction)
+        # help command
+        @self.tree.command(name="help", description="Shows all available commands")
+        async def help_command(interaction: discord.Interaction) -> None:
+            await self._help_command(interaction)
 
-            @self.tree.command(
-                name="create_spotify_playlist",
-                description="Collect Spotify URLs and create a playlist",
-                guild=guild
-            )
-            async def create_spotify_playlist(
-                interaction: discord.Interaction, limit: int | None = None
-            ) -> None:
-                await self._create_spotify_playlist(interaction, limit)
+        # create spotify playlist command
+        @self.tree.command(
+            name="create_spotify_playlist",
+            description="Collect Spotify URLs and create a playlist"
+        )
+        async def create_spotify_playlist(
+            interaction: discord.Interaction, limit: int | None = None
+        ) -> None:
+            await self._create_spotify_playlist(interaction, limit)
 
-            # sync
+        # sync commands to all guilds
+        for guild in self.discord_guilds:
+            self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
-        self.logger.info(f"Synced commands: {[s.name for s in synced]}")
-        self.logger.info(f"Guild IDs used: {self.guild_ids}")
+            self.logger.info("Synced commands %s to guild %s",
+                             [s.name for s in synced], guild.id)
 
     async def on_ready(self) -> None:
         """Signals that the connection to discord is good"""
-        self.logger.info(f"Connected guilds: {[g.id for g in self.guilds]}")
+        self.logger.info("Connected guilds: %s", [g.id for g in self.guilds])
 
     async def _help_command(self, interaction: discord.Interaction) -> None:
         """Help Command
@@ -112,13 +109,12 @@ class DiscordManager(discord.Client):
             interaction (discord.Interaction): interaction type
             limit (int | None): limit of messages to search. Defaults to 1000.
         """
-        # Prevents webhook timeouts on large requests
+        # defer() prevents webhook timeouts on long responses
         await interaction.response.defer()
         channel = interaction.channel
         spotify_urls = set()
-        self.logger.info(
-            f"Scanning channel '{channel}' (ID: {channel.id}) for Spotify URLs. Limit={limit}"
-        )
+        self.logger.info("Scanning channel '%s' (ID: %s) for Spotify URLs. Limit=%s",
+                         channel, channel.id, limit)
 
         message_count = 0
         async for message in channel.history(limit=limit):
@@ -128,8 +124,8 @@ class DiscordManager(discord.Client):
 
             message_count += 1
             if message_count % 100 == 0:
-                self.logger.info(f"Scanned {message_count} messages, "
-                                 f"found {len(spotify_urls)} URLs so far...")
+                self.logger.info("Scanned %s messages, found %s URLs so far...",
+                                 message_count, len(spotify_urls))
                 await asyncio.sleep(1)
 
         if not spotify_urls:
@@ -162,6 +158,4 @@ class DiscordManager(discord.Client):
         await interaction.followup.send(
             f"Finished compiling playlist: {playlist['external_urls']['spotify']}"
         )
-        self.logger.info(f"Created playlist: {playlist['external_urls']['spotify']}")
-
-
+        self.logger.info("Created playlist: %s", playlist['external_urls']['spotify'])
