@@ -3,40 +3,43 @@
     consolidate individual songs, albums, and playlists into other playlists.
     I also have hopes for the future to do some data analysis on the music.
 """
-import os
+from os import getenv
 import logging
 from dotenv import load_dotenv
-from spotify_manager import SpotifyManager
+from spotify_manager import SpotifyManager, SpotifyManagerSettings
 from discord_manager import DiscordManager, DiscordManagerSettings
 
 # --- Load environment variables ---
 load_dotenv()
 
 # --- Setup your credentials from env ---
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
-SPOTIFY_USER_ID = os.getenv("SPOTIFY_USER_ID")
+SPOTIFY_CLIENT_ID = getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = getenv("SPOTIFY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI = getenv("SPOTIFY_REDIRECT_URI")
+SPOTIFY_USER_ID = getenv("SPOTIFY_USER_ID")
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-TARGET_CHANNEL_NAME = os.getenv("TARGET_CHANNEL_NAME")
-GUILD_ID = os.getenv("GUILD_ID")
+DISCORD_BOT_TOKEN = getenv("DISCORD_BOT_TOKEN")
+TARGET_CHANNEL_NAME = getenv("TARGET_CHANNEL_NAME")
+GUILD_ID = getenv("GUILD_ID")
 
-LOGGING_FORMAT = os.getenv("LOGGING_FORMAT")
-DATE_FORMAT = os.getenv("DATE_FORMAT")
+LOGGING_FORMAT = getenv("LOGGING_FORMAT")
+DATE_FORMAT = getenv("DATE_FORMAT")
 
 # --- Initialize logging ---
 logging.basicConfig(level=logging.INFO, format=LOGGING_FORMAT, datefmt=DATE_FORMAT)
-logger = logging.getLogger("")
+logger = logging.getLogger("discord-spotify-util")
 log_handler = logging.FileHandler(
     filename="discord-spotify-util.log", encoding="utf-8", mode="w"
 )
 
 # --- Initialize managers ---
 spotify_manager = SpotifyManager(
-    client_id=SPOTIFY_CLIENT_ID,
-    client_secret=SPOTIFY_CLIENT_SECRET,
-    redirect_uri=SPOTIFY_REDIRECT_URI,
+    settings=SpotifyManagerSettings(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        logger=logger
+    )
 )
 
 discord_manager = DiscordManager(
@@ -46,7 +49,7 @@ discord_manager = DiscordManager(
         guild_id=GUILD_ID,
         user_id=SPOTIFY_USER_ID,
         logger=logger
-    ),
+    )
 )
 
 # --- Run Discord bot ---

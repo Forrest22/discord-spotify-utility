@@ -1,21 +1,21 @@
 """class wrapper for discord.py"""
 import re
-from collections import defaultdict
+from dataclasses import dataclass, field
+from logging import Logger
+from typing import Any
+from datetime import datetime
 import discord
-from utils import write_list_to_file
+from utils import write_list_to_file, remove_query_params
 from spotify_manager import SpotifyManager
 
-
+@dataclass
 class DiscordManagerSettings:
-    """DiscordManagerSettings
-    Different settings for initializing DiscordManager
-    """
-    def __init__(self, target_channel, guild_id, user_id, logger, **options):
-        self.target_channel = target_channel
-        self.guild_id = int(guild_id)
-        self.user_id = user_id
-        self.logger = logger
-        self.options = options
+    """Different settings for initializing DiscordManager"""
+    target_channel: str
+    guild_id: int
+    user_id: str
+    logger: Logger
+    options: dict[str, Any] = field(default_factory=dict)
 
 class DiscordManager(discord.Client):
     """
@@ -33,7 +33,7 @@ class DiscordManager(discord.Client):
         self.target_channel = discord_settings.target_channel
         self.guild_id = int(discord_settings.guild_id)
         self.user_id = discord_settings.user_id
-        self.user_tracks = defaultdict(list)
+        
         self.logger = discord_settings.logger
         self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
 
@@ -53,14 +53,14 @@ class DiscordManager(discord.Client):
             await self._help_command(interaction)
 
         @self.tree.command(
-            name="gather_spotify",
+            name="create_spotify_playlist",
             description="Collect Spotify URLs and create a playlist",
             guild=guild
         )
-        async def gather_spotify(
+        async def create_spotify_playlist(
             interaction: discord.Interaction, limit: int | None = None
         ) -> None:
-            await self._gather_spotify(interaction, limit)
+            await self._create_spotify_playlist(interaction, limit)
 
         # sync
         synced = await self.tree.sync(guild=guild)
@@ -84,7 +84,7 @@ class DiscordManager(discord.Client):
         )
 
         embed.add_field(
-            name="/gather_spotify",
+            name="/create_spotify_playlist",
             value="Collect Spotify URLs into a singular playlist. "
             + "Collects spotify tracks, albums, and playlists. "
             + "Then stores said songs and playlist for later. "
@@ -100,10 +100,11 @@ class DiscordManager(discord.Client):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def _gather_spotify(
+    async def _create_spotify_playlist(
         self, interaction: discord.Interaction, limit: int | None
     ) -> None:
-        """Internal logic for scanning Spotify URLs
+        """Internal logic for scanning Spotify URLs in the specified channel
+        and collects them into a playlist.
 
         Args:
             interaction (discord.Interaction): interaction type
@@ -123,20 +124,23 @@ class DiscordManager(discord.Client):
         async for message in channel.history(limit=limit):
             matches = self.spotify_url_pattern.findall(message.content)
             for url in matches:
-                spotify_urls.add(url)
+                spotify_urls.add(remove_query_params(url))
 
         if not spotify_urls:
             self.logger.info("No Spotify URLs found.")
             await interaction.followup.send("No Spotify URLs found in this channel.")
             return
 
-        # Deduplicate and sort
-        url_list = sorted(spotify_urls)
-        self.logger.info(f"Found {len(url_list)} Spotify URLs.")
-
         # Write to file, using the user.id to store info for other commands
-        write_list_to_file(url_list, str(interaction.user.id) + ".dsm")
+        write_list_to_file(spotify_urls, str(interaction.user.id) + ".dsm")
 
-        self.spotify_manager.create_playlist()
+        playlist_name = f"Spotify jams from {self.get_guild(self.guild_id).name}"
+        playlist_description = f"Spotify jams from #{self.target_channel} in {self.get_guild(self.guild_id).name} from {datetime.today().strftime("%Y-%m-%d")}. Created using discord-spotify-utility."
+        playlist = self.spotify_manager.create_playlist(playlist_name, playlist_description)
+        self.logger.info(f"Created playlist: {playlist["external_urls"]["spotify"]}")
 
-        self.logger.info("Finished sending Spotify URL results, written to disk.")
+        self.spotify_manager.add_tracks_to_playlist(playlist["id"], spotify_urls)
+        
+        await interaction.followup.send(f"Finished compiling playlist: {playlist["external_urls"]["spotify"]}")
+
+        self.logger.info(f"Finished sending Spotify URL results, written to disk. Playlist URL: {playlist["external_urls"]["spotify"]}")
