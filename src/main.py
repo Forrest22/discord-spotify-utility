@@ -4,9 +4,9 @@
     I also have hopes for the future to do some data analysis on the music.
 """
 from os import getenv
-import logging
-import discord
 from dotenv import load_dotenv
+from log_manager import setup_logging
+from db_manager import DBManager
 from spotify_manager import SpotifyManager, SpotifyManagerSettings
 from discord_manager import DiscordManager, DiscordManagerSettings
 
@@ -23,22 +23,23 @@ DISCORD_BOT_TOKEN = getenv("DISCORD_BOT_TOKEN")
 TARGET_CHANNEL_NAME = getenv("TARGET_CHANNEL_NAME")
 GUILD_IDS = [int(id) for id in getenv("GUILD_IDS").split(",")]
 
+DB_URL = getenv("DB_URL")
+
 LOGGING_FORMAT = getenv("LOGGING_FORMAT")
 DATE_FORMAT = getenv("DATE_FORMAT")
 
+
 # --- Initialize logging ---
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
 
-log_handler = logging.FileHandler(
-    filename="discord-spotify-util.log", encoding="utf-8", mode="w"
-)
-log_handler.setFormatter(logging.Formatter(fmt=LOGGING_FORMAT, datefmt=DATE_FORMAT))
-root_logger.addHandler(log_handler)
+setup_logging()
 
-discord.utils.setup_logging(handler=log_handler, level=logging.INFO)
+# --- Initialize Database ---
 
-# --- Initialize managers ---
+# opens/creates the db and ensures tables exist
+db = DBManager(db_url=DB_URL)
+
+# --- Initialize API managers ---
+
 spotify_manager = SpotifyManager(
     settings=SpotifyManagerSettings(
         client_id=SPOTIFY_CLIENT_ID,
@@ -57,4 +58,4 @@ discord_manager = DiscordManager(
 )
 
 # --- Run Discord bot ---
-discord_manager.run(DISCORD_BOT_TOKEN)
+discord_manager.run(DISCORD_BOT_TOKEN, log_handler=None)

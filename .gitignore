@@ -8,3 +8,4 @@ my-venv/
 *.log
 output.txt
 *.dsm
+*.db
