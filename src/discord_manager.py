@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import List, Any
 from datetime import datetime
 import discord
-from utils import write_list_to_file, remove_query_params
+from utils import remove_query_params
 from spotify_manager import SpotifyManager
 from db_manager import DBManager
 
