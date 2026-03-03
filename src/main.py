@@ -41,6 +41,7 @@ db = DBManager(db_url=DB_URL)
 # --- Initialize API managers ---
 
 spotify_manager = SpotifyManager(
+    db=db,
     settings=SpotifyManagerSettings(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
@@ -49,6 +50,7 @@ spotify_manager = SpotifyManager(
 )
 
 discord_manager = DiscordManager(
+    db=db,
     spotify_manager=spotify_manager,
     discord_settings=DiscordManagerSettings(
         target_channel=TARGET_CHANNEL_NAME,

@@ -8,6 +8,7 @@ from datetime import datetime
 import discord
 from utils import write_list_to_file, remove_query_params
 from spotify_manager import SpotifyManager
+from db_manager import DBManager
 
 @dataclass
 class DiscordManagerSettings:
@@ -23,12 +24,17 @@ class DiscordManager(discord.Client):
     built around discord.py
     """
     def __init__(
-        self, spotify_manager: SpotifyManager, discord_settings: DiscordManagerSettings
+        self, db: DBManager,
+        spotify_manager: SpotifyManager,
+        discord_settings: DiscordManagerSettings
     ):
+        self.logger = logging.getLogger("discord-spotify-util.discord")
+
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, **discord_settings.options)
 
+        self.db = db
         self.spotify_manager = spotify_manager
         self.target_channel = discord_settings.target_channel
         self.discord_guilds = [
@@ -36,7 +42,6 @@ class DiscordManager(discord.Client):
         ]
         self.user_id = discord_settings.user_id
 
-        self.logger = logging.getLogger("discord-spotify-util.discord")
         self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
 
         self.tree = discord.app_commands.CommandTree(self)
@@ -111,51 +116,126 @@ class DiscordManager(discord.Client):
         """
         # defer() prevents webhook timeouts on long responses
         await interaction.response.defer()
-        channel = interaction.channel
-        spotify_urls = set()
-        self.logger.info("Scanning channel '%s' (ID: %s) for Spotify URLs. Limit=%s",
-                         channel, channel.id, limit)
+        try:
+            channel = interaction.channel
+            spotify_urls = set()
+            self.logger.info("Scanning channel '%s' (ID: %s) for Spotify URLs. Limit=%s",
+                            channel, channel.id, limit)
 
-        message_count = 0
-        async for message in channel.history(limit=limit):
-            matches = self.spotify_url_pattern.findall(message.content)
-            for url in matches:
-                spotify_urls.add(remove_query_params(url))
+            self.db.get_or_create_guild(
+                guild_id=interaction.guild.id,
+                name=interaction.guild.name,
+                raw_data=_guild_to_dict(interaction.guild)
+            )
+            self.db.get_or_create_channel(
+                channel_id=channel.id,
+                guild_id=interaction.guild.id,
+                name=channel.name,
+                raw_data=_channel_to_dict(interaction.channel)
+            )
 
-            message_count += 1
-            if message_count % 100 == 0:
-                self.logger.info("Scanned %s messages, found %s URLs so far...",
-                                 message_count, len(spotify_urls))
-                await asyncio.sleep(1)
+            # inside the loop — only user and message change per iteration
+            message_count = 0
+            async for message in channel.history(limit=limit):
+                matches = self.spotify_url_pattern.findall(message.content)
+                for url in matches:
+                    spotify_urls.add(remove_query_params(url))
 
-        if not spotify_urls:
-            self.logger.info("No Spotify URLs found.")
-            await interaction.followup.send("No Spotify URLs found in this channel.")
+                self.db.get_or_create_discord_user(
+                    user_id=message.author.id,
+                    username=message.author.name,
+                    raw_data=_user_to_dict(interaction.user)
+                )
+                self.db.record_message(
+                    message_id=message.id,
+                    channel_id=channel.id,
+                    author_id=message.author.id,
+                    content=message.content,
+                    created_at=message.created_at,
+                    raw_data=_message_to_dict(message),
+                    spotify_urls=[remove_query_params(u) for u in matches],
+                )
+
+                message_count += 1
+                if message_count % 100 == 0:
+                    self.logger.info("Scanned %s messages, found %s URLs so far...",
+                                    message_count, len(spotify_urls))
+                    await asyncio.sleep(1)
+
+            if not spotify_urls:
+                self.logger.info("No Spotify URLs found.")
+                await interaction.followup.send("No Spotify URLs found in this channel.")
+                return
+
+            playlist_name = f"{interaction.guild.name} jams | DSU"
+            playlist_description = (
+                f"Spotify jams discord server {interaction.guild.name} compiled from "
+                f"#{interaction.channel.name} at "
+                f"{datetime.today().strftime('%Y-%m-%d')}. "
+                f"Created using discord-spotify-utility. "
+                "https://github.com/Forrest22/discord-spotify-utility"
+            )
+
+            loop = asyncio.get_event_loop()
+
+            # Run blocking Spotify calls in a thread executor
+            playlist = await loop.run_in_executor(
+                None, self.spotify_manager.create_playlist, playlist_name, playlist_description
+            )
+
+            await loop.run_in_executor(
+                None, self.spotify_manager.add_tracks_to_playlist, playlist["id"], spotify_urls
+            )
+
+            await interaction.followup.send(
+                f"Finished compiling playlist: {playlist['external_urls']['spotify']}"
+            )
+            self.logger.info("Created playlist: %s", playlist['external_urls']['spotify'])
+        except Exception as e:
+            self.logger.exception("Error in _create_spotify_playlist: %s", e)
+            await interaction.followup.send(
+                "Something went wrong while creating the playlist."
+            )
             return
 
-        write_list_to_file(spotify_urls, str(interaction.user.id) + ".dsm")
+def _guild_to_dict(guild: discord.Guild) -> dict:
+    return {
+        "id": guild.id,
+        "name": guild.name,
+        "icon": str(guild.icon) if guild.icon else None,
+        "owner_id": guild.owner_id,
+        "member_count": guild.member_count,
+    }
 
-        playlist_name = f"{interaction.guild.name} jams | DSU"
-        playlist_description = (
-            f"Spotify jams discord server {interaction.guild.name} compiled from "
-            f"#{interaction.channel.name} at "
-            f"{datetime.today().strftime('%Y-%m-%d')}. "
-            f"Created using discord-spotify-utility. "
-            "https://github.com/Forrest22/discord-spotify-utility"
-        )
+def _channel_to_dict(channel: discord.TextChannel) -> dict:
+    return {
+        "id": channel.id,
+        "name": channel.name,
+        "guild_id": channel.guild.id,
+        "topic": channel.topic,
+        "nsfw": channel.nsfw,
+        "position": channel.position,
+    }
 
-        loop = asyncio.get_event_loop()
+def _user_to_dict(user: discord.User | discord.Member) -> dict:
+    return {
+        "id": user.id,
+        "username": user.name,
+        "discriminator": user.discriminator,
+        "bot": user.bot,
+        "avatar": str(user.avatar) if user.avatar else None,
+    }
 
-        # Run blocking Spotify calls in a thread executor
-        playlist = await loop.run_in_executor(
-            None, self.spotify_manager.create_playlist, playlist_name, playlist_description
-        )
-
-        await loop.run_in_executor(
-            None, self.spotify_manager.add_tracks_to_playlist, playlist["id"], spotify_urls
-        )
-
-        await interaction.followup.send(
-            f"Finished compiling playlist: {playlist['external_urls']['spotify']}"
-        )
-        self.logger.info("Created playlist: %s", playlist['external_urls']['spotify'])
+def _message_to_dict(message: discord.Message) -> dict:
+    return {
+        "id": message.id,
+        "content": message.content,
+        "created_at": message.created_at.isoformat(),
+        "edited_at": message.edited_at.isoformat() if message.edited_at else None,
+        "author_id": message.author.id,
+        "channel_id": message.channel.id,
+        "guild_id": message.guild.id if message.guild else None,
+        "pinned": message.pinned,
+        "tts": message.tts,
+        "mention_everyone": message.mention_everyone,
+    }

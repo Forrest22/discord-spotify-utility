@@ -4,6 +4,7 @@ import logging
 from typing import List, Any, Set
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+from db_manager import DBManager
 
 @dataclass
 class SpotifyManagerSettings:
@@ -18,7 +19,7 @@ class SpotifyManager:
     """
     Wrapper class for using spotipy
     """
-    def __init__(self, settings: SpotifyManagerSettings):
+    def __init__(self, db: DBManager, settings: SpotifyManagerSettings):
         self.logger = logging.getLogger("discord-spotify-util.spotify")
         self.spotipy = spotipy.Spotify(
             auth_manager=SpotifyOAuth(
@@ -28,6 +29,7 @@ class SpotifyManager:
                 scope="playlist-modify-public"
             )
         )
+        self.db = db
         self.logger.info("Spotify client connected as %s",
                          self.spotipy.current_user()["display_name"])
 
