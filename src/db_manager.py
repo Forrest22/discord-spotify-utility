@@ -56,11 +56,7 @@ class Message(Base):
     raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
 
 class SpotifyLink(Base):
-    """_summary_
-
-    Args:
-        Base (_type_): _description_
-    """
+    """Spotify Link"""
     __tablename__ = "message_spotify_links"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     message_id: Mapped[int] = mapped_column(ForeignKey("messages.id"), nullable=False)
