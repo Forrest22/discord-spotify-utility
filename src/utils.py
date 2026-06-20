@@ -1,22 +1,17 @@
 """Assorted utility functions"""
-from typing import List
 import urllib.parse
 
-def write_list_to_file(l: List, filename: str) -> None:
-    """Writes a list to a file, temp until I implement a more permanent solution"""
-    with open("storage/" + filename, "w", encoding="UTF-8") as file:
-        for item in l:
-            file.write(item + "\n")
+def parse_spotify_url(url: str) -> tuple[str | None, str | None]:
+    """Extract resource type and ID from a Spotify URL.
+    e.g. https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC
+         -> ('track', '4uLU6hMCjMI75M1A2tKUQC')
+    """
+    path_parts = url.rstrip("/").split("open.spotify.com/")[-1].split("/")
+    if len(path_parts) >= 2:
+        return path_parts[0], path_parts[1].split("?")[0]
+    return None, None
 
-def open_list_from_file(filename: str) -> List:
-    """Reads a list from each line in file"""
-    l = []
-    with open("storage/" + filename, "r", encoding="UTF-8") as file:
-        for line in file:
-            l.append(line.rstrip())
-
-def remove_query_params(url):
+def remove_query_params(url: str) -> str:
     """Removes URL query params from given string"""
-    parsed_url = urllib.parse.urlparse(url)
-    clean_url = parsed_url.scheme + "://" + parsed_url.netloc + parsed_url.path
-    return clean_url
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme + "://" + parsed.netloc + parsed.path

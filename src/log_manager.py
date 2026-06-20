@@ -55,7 +55,7 @@ def setup_logging(
 
     # File handler
     log_file_handler = logging.FileHandler(
-        filename=log_file, encoding="utf-8", mode="w"
+        filename=log_file, encoding="utf-8", mode="a"
     )
     log_file_handler.setFormatter(file_formatter)
 

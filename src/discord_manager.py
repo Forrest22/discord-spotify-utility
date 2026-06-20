@@ -6,9 +6,11 @@ from dataclasses import dataclass, field
 from typing import List, Any
 from datetime import datetime
 import discord
+import spotipy
+from sqlalchemy.exc import SQLAlchemyError
 from utils import remove_query_params
 from spotify_manager import SpotifyManager
-from db_manager import DBManager
+from db_manager import DBManager, MessageRecord
 
 @dataclass
 class DiscordManagerSettings:
@@ -23,6 +25,8 @@ class DiscordManager(discord.Client):
     discord.py wrapper class
     built around discord.py
     """
+    SPOTIFY_URL_PATTERN = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
+
     def __init__(
         self, db: DBManager,
         spotify_manager: SpotifyManager,
@@ -42,8 +46,6 @@ class DiscordManager(discord.Client):
         ]
         self.user_id = discord_settings.user_id
 
-        self.spotify_url_pattern = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
-
         self.tree = discord.app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
@@ -60,7 +62,7 @@ class DiscordManager(discord.Client):
             description="Collect Spotify URLs and create a playlist"
         )
         async def create_spotify_playlist(
-            interaction: discord.Interaction, limit: int | None = None
+            interaction: discord.Interaction, limit: int | None = 1000
         ) -> None:
             await self._create_spotify_playlist(interaction, limit)
 
@@ -105,14 +107,14 @@ class DiscordManager(discord.Client):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _create_spotify_playlist(
-        self, interaction: discord.Interaction, limit: int | None = 1000
+        self, interaction: discord.Interaction, limit: int | None = None
     ) -> None:
         """Internal logic for scanning Spotify URLs in the specified channel
         and collects them into a playlist.
 
         Args:
             interaction (discord.Interaction): interaction type
-            limit (int | None): limit of messages to search. Defaults to 1000.
+            limit (int | None): limit of messages to search. Defaults to None.
         """
         # defer() prevents webhook timeouts on long responses
         await interaction.response.defer()
@@ -137,16 +139,16 @@ class DiscordManager(discord.Client):
             # inside the loop — only user and message change per iteration
             message_count = 0
             async for message in channel.history(limit=limit):
-                matches = self.spotify_url_pattern.findall(message.content)
+                matches = self.SPOTIFY_URL_PATTERN.findall(message.content)
                 for url in matches:
                     spotify_urls.add(remove_query_params(url))
 
                 self.db.get_or_create_discord_user(
                     user_id=message.author.id,
                     username=message.author.name,
-                    raw_data=_user_to_dict(interaction.user)
+                    raw_data=_user_to_dict(message.author)
                 )
-                self.db.record_message(
+                self.db.record_message(MessageRecord(
                     message_id=message.id,
                     channel_id=channel.id,
                     author_id=message.author.id,
@@ -154,7 +156,7 @@ class DiscordManager(discord.Client):
                     created_at=message.created_at,
                     raw_data=_message_to_dict(message),
                     spotify_urls=[remove_query_params(u) for u in matches],
-                )
+                ))
 
                 message_count += 1
                 if message_count % 100 == 0:
@@ -191,12 +193,11 @@ class DiscordManager(discord.Client):
                 f"Finished compiling playlist: {playlist['external_urls']['spotify']}"
             )
             self.logger.info("Created playlist: %s", playlist['external_urls']['spotify'])
-        except Exception as e:
+        except (discord.HTTPException, spotipy.SpotifyException, SQLAlchemyError) as e:
             self.logger.exception("Error in _create_spotify_playlist: %s", e)
             await interaction.followup.send(
                 "Something went wrong while creating the playlist."
             )
-            return
 
 def _guild_to_dict(guild: discord.Guild) -> dict:
     return {

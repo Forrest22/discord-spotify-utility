@@ -1,7 +1,8 @@
-""" 
+"""
 database management using sqlalchemy
 """
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 import logging
 from datetime import datetime, timezone
 from os import makedirs
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 from sqlalchemy import JSON, create_engine, Integer, Text, DateTime, ForeignKey
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped, relationship
+from utils import parse_spotify_url
 
 class Base(DeclarativeBase):
     """Base class for sqlalchemy"""
@@ -65,6 +67,18 @@ class SpotifyLink(Base):
     resource_id: Mapped[Optional[str]] = mapped_column(Text)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
     message: Mapped["Message"] = relationship(back_populates="spotify_links")
+
+# --- Data transfer objects ---
+@dataclass
+class MessageRecord:
+    """Data needed to record a Discord message and its Spotify links."""
+    message_id: int
+    channel_id: int
+    author_id: int
+    content: Optional[str]
+    created_at: datetime
+    spotify_urls: list[str] = field(default_factory=list)
+    raw_data: Optional[dict] = None
 
 # --- Manager ---
 class DBManager:
@@ -143,9 +157,9 @@ class DBManager:
         with self._session() as session:
             channel = session.get(Channel, channel_id)
             if not channel:
-                channel = Channel(id=channel_id, guild_id=guild_id, name=name)
+                channel = Channel(id=channel_id, guild_id=guild_id, name=name, raw_data=raw_data)
                 session.add(channel)
-            elif channel.name != name:
+            else:
                 channel.name = name
                 if raw_data is not None:
                     channel.raw_data = raw_data
@@ -169,44 +183,35 @@ class DBManager:
         with self._session() as session:
             user = session.get(DiscordUser, user_id)
             if not user:
-                user = DiscordUser(id=user_id, username=username)
+                user = DiscordUser(id=user_id, username=username, raw_data=raw_data)
                 session.add(user)
-            elif user.username != username:
+            else:
                 user.username = username
                 if raw_data is not None:
                     user.raw_data = raw_data
             return user
 
-    def record_message(
-        self,
-        message_id: int,
-        channel_id: int,
-        author_id: int,
-        content: Optional[str],
-        created_at: datetime,
-        spotify_urls: list[str] | None = None,
-        raw_data: Optional[dict] = None
-    ) -> Message:
+    def record_message(self, record: MessageRecord) -> Message:
         """Record a message and any spotify links found in it."""
         with self._session() as session:
-            message = session.get(Message, message_id)
+            message = session.get(Message, record.message_id)
             if message:
                 return message  # already recorded, skip
 
             message = Message(
-                id=message_id,
-                channel_id=channel_id,
-                author_id=author_id,
-                content=content,
-                created_at=created_at,
-                raw_data=raw_data
+                id=record.message_id,
+                channel_id=record.channel_id,
+                author_id=record.author_id,
+                content=record.content,
+                created_at=record.created_at,
+                raw_data=record.raw_data
             )
             session.add(message)
 
-            for url in (spotify_urls or []):
-                resource_type, resource_id = self._parse_spotify_url(url)
+            for url in record.spotify_urls:
+                resource_type, resource_id = parse_spotify_url(url)
                 session.add(SpotifyLink(
-                    message_id=message_id,
+                    message_id=record.message_id,
                     url=url,
                     resource_type=resource_type,
                     resource_id=resource_id,
@@ -230,17 +235,3 @@ class DBManager:
                 .filter(Message.channel_id == channel_id)
                 .all()
             )
-
-    @staticmethod
-    def _parse_spotify_url(url: str) -> tuple[Optional[str], Optional[str]]:
-        """Extract resource type and ID from a Spotify URL.
-        e.g. https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC
-             -> ('track', '4uLU6hMCjMI75M1A2tKUQC')
-        """
-        try:
-            path_parts = url.rstrip("/").split("open.spotify.com/")[-1].split("/")
-            if len(path_parts) >= 2:
-                return path_parts[0], path_parts[1].split("?")[0]
-        except Exception:
-            pass
-        return None, None

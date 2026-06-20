@@ -5,6 +5,7 @@ from typing import List, Any, Set
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from db_manager import DBManager
+from utils import parse_spotify_url
 
 @dataclass
 class SpotifyManagerSettings:
@@ -60,7 +61,7 @@ class SpotifyManager:
 
     def add_tracks_to_playlist(self, playlist_id: str, track_urls: List[str]) -> None:
         """Adds a number of track ids to a playlist, supports track, album, and playlist links.
-        
+
         Args:
             playlist_id (str): id of the playlist
             track_urls (List[str]): list of track/album/playlist URLs
@@ -71,44 +72,43 @@ class SpotifyManager:
             self.spotipy.playlist_add_items(playlist_id, list(track_uris)[i:i + 100])
 
     def _get_deduped_track_uris_from_urls(self, track_urls: List[str]) -> Set[str]:
-        track_uris = set()
+        track_uris: Set[str] = set()
+        for url in track_urls:
+            resource_type, resource_id = parse_spotify_url(url)
+            if resource_type == "track":
+                track_uris.add(f"spotify:track:{resource_id}")
+            elif resource_type == "album":
+                track_uris |= self._collect_album_track_uris(resource_id)
+            elif resource_type == "playlist":
+                track_uris |= self._collect_playlist_track_uris(resource_id)
+        return track_uris
 
-        for item in track_urls:
-            if "track" in item:
-                track_id = item.split("track/")[-1].split("?")[0]
-                track_uris.add(f"spotify:track:{track_id}")
+    def _collect_album_track_uris(self, album_id: str) -> Set[str]:
+        track_uris: Set[str] = set()
+        results = self.spotipy.album_tracks(album_id)
+        while True:
+            for t in results["items"]:
+                if t["uri"].startswith("spotify:track:"):
+                    track_uris.add(t["uri"])
+            if not results["next"]:
+                break
+            results = self.spotipy.next(results)
+        return track_uris
 
-            elif "album" in item:
-                album_id = item.split("album/")[-1].split("?")[0] if "album/" in item else item
-                results = self.spotipy.album_tracks(album_id)
+    def _collect_playlist_track_uris(self, playlist_id: str) -> Set[str]:
+        track_uris: Set[str] = set()
+        try:
+            results = self.spotipy.playlist_items(playlist_id)
+            while True:
                 for t in results["items"]:
-                    if t["uri"].startswith("spotify:track:"):
-                        track_uris.add(t["uri"])
-
-                while results["next"]:
-                    results = self.spotipy.next(results)
-                    for t in results["items"]:
-                        if t["uri"].startswith("spotify:track:"):
-                            track_uris.add(t["uri"])
-
-            elif "playlist" in item:
-                pl_id = item.split("playlist/")[-1].split("?")[0] if "playlist/" in item else item
-                try:
-                    results = self.spotipy.playlist_items(pl_id)
-                    for t in results["items"]:
-                        if t["track"] and t["track"]["uri"].startswith("spotify:track:"):
-                            track_uris.add(t["track"]["uri"])
-
-                    while results["next"]:
-                        results = self.spotipy.next(results)
-                        for t in results["items"]:
-                            if t["track"] and t["track"]["uri"].startswith("spotify:track:"):
-                                track_uris.add(t["track"]["uri"])
-
-                except spotipy.SpotifyException as e:
-                    if e.http_status == 404:
-                        self.logger.warning("Skipping inaccessible playlist %s: %s", pl_id, e)
-                    else:
-                        raise
-
+                    if t["track"] and t["track"]["uri"].startswith("spotify:track:"):
+                        track_uris.add(t["track"]["uri"])
+                if not results["next"]:
+                    break
+                results = self.spotipy.next(results)
+        except spotipy.SpotifyException as e:
+            if e.http_status == 404:
+                self.logger.warning("Skipping inaccessible playlist %s: %s", playlist_id, e)
+            else:
+                raise
         return track_uris

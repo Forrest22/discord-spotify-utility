@@ -21,7 +21,10 @@ SPOTIFY_USER_ID = getenv("SPOTIFY_USER_ID")
 
 DISCORD_BOT_TOKEN = getenv("DISCORD_BOT_TOKEN")
 TARGET_CHANNEL_NAME = getenv("TARGET_CHANNEL_NAME")
-GUILD_IDS = [int(id) for id in getenv("GUILD_IDS").split(",")]
+_raw_guild_ids = getenv("GUILD_IDS")
+if not _raw_guild_ids:
+    raise ValueError("GUILD_IDS is not set. Add a comma-separated list of guild IDs to .env")
+GUILD_IDS = [int(guild_id) for guild_id in _raw_guild_ids.split(",")]
 
 DB_URL = getenv("DB_URL")
 
