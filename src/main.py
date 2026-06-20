@@ -1,5 +1,5 @@
 """Discord/Spotify Bot for Discord
-    Helps collect playlists that were used to play music via bot commands and 
+    Helps collect playlists that were used to play music via bot commands and
     consolidate individual songs, albums, and playlists into other playlists.
     I also have hopes for the future to do some data analysis on the music.
 """
@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from log_manager import setup_logging
 from db_manager import DBManager
 from spotify_manager import SpotifyManager, SpotifyManagerSettings
+from stats_manager import StatsManager
 from discord_manager import DiscordManager, DiscordManagerSettings
 
 # --- Load environment variables ---
@@ -21,10 +22,10 @@ SPOTIFY_USER_ID = getenv("SPOTIFY_USER_ID")
 
 DISCORD_BOT_TOKEN = getenv("DISCORD_BOT_TOKEN")
 TARGET_CHANNEL_NAME = getenv("TARGET_CHANNEL_NAME")
-_raw_guild_ids = getenv("GUILD_IDS")
-if not _raw_guild_ids:
+_RAW_GUILD_IDS = getenv("GUILD_IDS")
+if not _RAW_GUILD_IDS:
     raise ValueError("GUILD_IDS is not set. Add a comma-separated list of guild IDs to .env")
-GUILD_IDS = [int(guild_id) for guild_id in _raw_guild_ids.split(",")]
+GUILD_IDS = [int(guild_id) for guild_id in _RAW_GUILD_IDS.split(",")]
 
 DB_URL = getenv("DB_URL")
 
@@ -52,9 +53,12 @@ spotify_manager = SpotifyManager(
     )
 )
 
+stats_manager = StatsManager(db=db)
+
 discord_manager = DiscordManager(
     db=db,
     spotify_manager=spotify_manager,
+    stats_manager=stats_manager,
     discord_settings=DiscordManagerSettings(
         target_channel=TARGET_CHANNEL_NAME,
         guild_ids=GUILD_IDS,

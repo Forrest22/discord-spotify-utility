@@ -8,14 +8,27 @@ from datetime import datetime, timezone
 from os import makedirs
 from pathlib import Path
 from typing import Optional
-from sqlalchemy import JSON, create_engine, Integer, Text, DateTime, ForeignKey
+from sqlalchemy import (
+    JSON, Table, Column, UniqueConstraint,
+    create_engine, Integer, Text, DateTime, ForeignKey,
+)
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, mapped_column, Mapped, relationship
 from utils import parse_spotify_url
+
 
 class Base(DeclarativeBase):
     """Base class for sqlalchemy"""
 
-# --- Models ---
+
+# --- Association tables ---
+track_artists = Table(
+    "track_artists",
+    Base.metadata,
+    Column("track_id", Text, ForeignKey("tracks.id"), primary_key=True),
+    Column("artist_id", Text, ForeignKey("artists.id"), primary_key=True),
+)
+
+# --- Discord models ---
 class Guild(Base):
     """Guild (AKA Discord Server)"""
     __tablename__ = "guilds"
@@ -55,6 +68,7 @@ class Message(Base):
     channel: Mapped["Channel"] = relationship(back_populates="messages")
     author: Mapped["DiscordUser"] = relationship(back_populates="messages")
     spotify_links: Mapped[list["SpotifyLink"]] = relationship(back_populates="message")
+    track_shares: Mapped[list["TrackShare"]] = relationship(back_populates="message")
     raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
 
 class SpotifyLink(Base):
@@ -68,6 +82,50 @@ class SpotifyLink(Base):
     raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
     message: Mapped["Message"] = relationship(back_populates="spotify_links")
 
+# --- Spotify enrichment models ---
+class Artist(Base):
+    """Spotify Artist"""
+    __tablename__ = "artists"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    genres: Mapped[Optional[list]] = mapped_column(JSON)
+    raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
+    tracks: Mapped[list["Track"]] = relationship(secondary=track_artists, back_populates="artists")
+
+class Album(Base):
+    """Spotify Album"""
+    __tablename__ = "albums"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    genres: Mapped[Optional[list]] = mapped_column(JSON)
+    raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
+    tracks: Mapped[list["Track"]] = relationship(back_populates="album")
+
+class Track(Base):
+    """Spotify Track"""
+    __tablename__ = "tracks"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    album_id: Mapped[Optional[str]] = mapped_column(Text, ForeignKey("albums.id"), nullable=True)
+    raw_data: Mapped[Optional[dict]] = mapped_column(JSON)
+    album: Mapped[Optional["Album"]] = relationship(back_populates="tracks")
+    artists: Mapped[list["Artist"]] = relationship(
+        secondary=track_artists, back_populates="tracks"
+    )
+    shares: Mapped[list["TrackShare"]] = relationship(back_populates="track")
+
+class TrackShare(Base):
+    """Analytics fact: one row per (message, resolved track)."""
+    __tablename__ = "track_shares"
+    __table_args__ = (UniqueConstraint("message_id", "track_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id"), nullable=False)
+    track_id: Mapped[str] = mapped_column(Text, ForeignKey("tracks.id"), nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)  # 'track'|'album'|'playlist'
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped["Message"] = relationship(back_populates="track_shares")
+    track: Mapped["Track"] = relationship(back_populates="shares")
+
 # --- Data transfer objects ---
 @dataclass
 class MessageRecord:
@@ -78,6 +136,15 @@ class MessageRecord:
     content: Optional[str]
     created_at: datetime
     spotify_urls: list[str] = field(default_factory=list)
+    raw_data: Optional[dict] = None
+
+@dataclass
+class TrackData:
+    """Data needed to upsert a Spotify track."""
+    track_id: str
+    name: str
+    album_id: Optional[str]
+    artist_ids: list[str]
     raw_data: Optional[dict] = None
 
 # --- Manager ---
@@ -99,139 +166,190 @@ class DBManager:
         self.logger.info("Database ready.")
 
     @contextmanager
-    def _session(self):
-        session = self._session_factory()
+    def session(self):
+        """Context manager providing a transactional DB session."""
+        s = self._session_factory()
         try:
-            yield session
-            session.commit()
+            yield s
+            s.commit()
         except Exception:
-            session.rollback()
+            s.rollback()
             raise
         finally:
-            session.close()
+            s.close()
+
+    # --- Discord entity upserts ---
 
     def get_or_create_guild(
         self,
         guild_id: int,
         name: str,
         raw_data: Optional[dict] = None
-    ) -> Guild:
-        """gets, creates, or updates the guild (discord server)
-
-        Args:
-            guild_id (int): guild id
-            name (str): name of guild
-            raw_data (Optional[dict], optional): raw data from the API. Defaults to None.
-
-        Returns:
-            Guild: the guild (the discord server) info
-        """
-        with self._session() as session:
-            guild = session.get(Guild, guild_id)
+    ) -> None:
+        """gets, creates, or updates the guild (discord server)"""
+        with self.session() as s:
+            guild = s.get(Guild, guild_id)
             if not guild:
-                guild = Guild(id=guild_id, name=name, raw_data=raw_data)
-                session.add(guild)
+                s.add(Guild(id=guild_id, name=name, raw_data=raw_data))
             else:
                 guild.name = name
                 if raw_data is not None:
                     guild.raw_data = raw_data
-            return guild
 
     def get_or_create_channel(
         self,
         channel_id: int,
-        guild_id: int, name: str,
+        guild_id: int,
+        name: str,
         raw_data: Optional[dict] = None
-    ) -> Channel:
-        """gets, creates, or updates the guild (discord server)
-
-        Args:
-            channel_id (int): discord channel id
-            guild_id (int): discord server id
-            name (str): name of the channel
-            raw_data (Optional[dict], optional): raw data from the API. Defaults to None.
-
-        Returns:
-            Channel: the channel info
-        """
-        with self._session() as session:
-            channel = session.get(Channel, channel_id)
+    ) -> None:
+        """gets, creates, or updates the channel"""
+        with self.session() as s:
+            channel = s.get(Channel, channel_id)
             if not channel:
-                channel = Channel(id=channel_id, guild_id=guild_id, name=name, raw_data=raw_data)
-                session.add(channel)
+                s.add(Channel(
+                    id=channel_id, guild_id=guild_id, name=name, raw_data=raw_data
+                ))
             else:
                 channel.name = name
                 if raw_data is not None:
                     channel.raw_data = raw_data
-            return channel
 
     def get_or_create_discord_user(
-        self, user_id: int,
+        self,
+        user_id: int,
         username: str,
         raw_data: Optional[dict] = None
-    ) -> DiscordUser:
-        """gets, creates, or updates the user data
-
-        Args:
-            user_id (int): discord user id
-            username (str): discord username
-            raw_data (Optional[dict], optional): raw data from the API. Defaults to None.
-
-        Returns:
-            DiscordUser: discord user information
-        """
-        with self._session() as session:
-            user = session.get(DiscordUser, user_id)
+    ) -> None:
+        """gets, creates, or updates the user"""
+        with self.session() as s:
+            user = s.get(DiscordUser, user_id)
             if not user:
-                user = DiscordUser(id=user_id, username=username, raw_data=raw_data)
-                session.add(user)
+                s.add(DiscordUser(id=user_id, username=username, raw_data=raw_data))
             else:
                 user.username = username
                 if raw_data is not None:
                     user.raw_data = raw_data
-            return user
 
-    def record_message(self, record: MessageRecord) -> Message:
-        """Record a message and any spotify links found in it."""
-        with self._session() as session:
-            message = session.get(Message, record.message_id)
-            if message:
-                return message  # already recorded, skip
+    def record_message(self, record: MessageRecord) -> None:
+        """Record a message and any spotify links found in it. Idempotent."""
+        with self.session() as s:
+            if s.get(Message, record.message_id):
+                return  # already recorded, skip
 
-            message = Message(
+            s.add(Message(
                 id=record.message_id,
                 channel_id=record.channel_id,
                 author_id=record.author_id,
                 content=record.content,
                 created_at=record.created_at,
-                raw_data=record.raw_data
-            )
-            session.add(message)
-
+                raw_data=record.raw_data,
+            ))
             for url in record.spotify_urls:
                 resource_type, resource_id = parse_spotify_url(url)
-                session.add(SpotifyLink(
+                s.add(SpotifyLink(
                     message_id=record.message_id,
                     url=url,
                     resource_type=resource_type,
                     resource_id=resource_id,
                 ))
 
-            return message
-
     def get_spotify_links_for_channel(self, channel_id: int) -> list[SpotifyLink]:
-        """Returns a list of spotify links for given channel_id
-
-        Args:
-            channel_id (int): channel_id
-
-        Returns:
-            list[SpotifyLink]: list of the spotify links in the db for that channel
-        """
-        with self._session() as session:
+        """Returns a list of spotify links for given channel_id"""
+        with self.session() as s:
             return (
-                session.query(SpotifyLink)
+                s.query(SpotifyLink)
                 .join(Message)
                 .filter(Message.channel_id == channel_id)
                 .all()
             )
+
+    def get_all_spotify_links(self) -> list[tuple]:
+        """Return (message_id, url, resource_type, resource_id) tuples for all spotify links."""
+        with self.session() as s:
+            rows = s.query(
+                SpotifyLink.message_id,
+                SpotifyLink.url,
+                SpotifyLink.resource_type,
+                SpotifyLink.resource_id,
+            ).all()
+            return list(rows)
+
+    # --- Spotify enrichment upserts ---
+
+    def upsert_artist(
+        self,
+        artist_id: str,
+        name: str,
+        genres: list[str],
+        raw_data: Optional[dict] = None
+    ) -> None:
+        """Upsert a Spotify artist."""
+        with self.session() as s:
+            artist = s.get(Artist, artist_id)
+            if not artist:
+                s.add(Artist(id=artist_id, name=name, genres=genres, raw_data=raw_data))
+            else:
+                artist.name = name
+                artist.genres = genres
+                if raw_data is not None:
+                    artist.raw_data = raw_data
+
+    def upsert_album(
+        self,
+        album_id: str,
+        name: str,
+        genres: list[str],
+        raw_data: Optional[dict] = None
+    ) -> None:
+        """Upsert a Spotify album."""
+        with self.session() as s:
+            album = s.get(Album, album_id)
+            if not album:
+                s.add(Album(id=album_id, name=name, genres=genres, raw_data=raw_data))
+            else:
+                album.name = name
+                album.genres = genres
+                if raw_data is not None:
+                    album.raw_data = raw_data
+
+    def upsert_track(self, data: TrackData) -> None:
+        """Upsert a Spotify track and link it to its artists."""
+        with self.session() as s:
+            track = s.get(Track, data.track_id)
+            if not track:
+                track = Track(
+                    id=data.track_id,
+                    name=data.name,
+                    album_id=data.album_id,
+                    raw_data=data.raw_data,
+                )
+                s.add(track)
+            else:
+                track.name = data.name
+                track.album_id = data.album_id
+                if data.raw_data is not None:
+                    track.raw_data = data.raw_data
+            track.artists = [a for a in (s.get(Artist, aid) for aid in data.artist_ids) if a]
+
+    def record_track_share(
+        self,
+        message_id: int,
+        track_id: str,
+        source_type: str,
+        source_id: str,
+    ) -> None:
+        """Record that a message resolved to a given track. Idempotent."""
+        with self.session() as s:
+            exists = (
+                s.query(TrackShare)
+                .filter_by(message_id=message_id, track_id=track_id)
+                .first()
+            )
+            if not exists:
+                s.add(TrackShare(
+                    message_id=message_id,
+                    track_id=track_id,
+                    source_type=source_type,
+                    source_id=source_id,
+                ))

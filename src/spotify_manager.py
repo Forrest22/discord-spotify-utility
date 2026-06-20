@@ -4,8 +4,9 @@ import logging
 from typing import List, Any, Set
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-from db_manager import DBManager
+from db_manager import DBManager, TrackData
 from utils import parse_spotify_url
+
 
 @dataclass
 class SpotifyManagerSettings:
@@ -15,6 +16,18 @@ class SpotifyManagerSettings:
     client_id: str
     client_secret: str
     redirect_uri: str
+
+
+def _slim_track(t: dict) -> dict:
+    return {"id": t["id"], "name": t["name"], "popularity": t.get("popularity")}
+
+def _slim_artist(a: dict) -> dict:
+    return {"id": a["id"], "name": a["name"], "genres": a.get("genres", [])}
+
+def _slim_album(a: dict) -> dict:
+    return {"id": a["id"], "name": a["name"], "genres": a.get("genres", []),
+            "release_date": a.get("release_date")}
+
 
 class SpotifyManager:
     """
@@ -39,13 +52,11 @@ class SpotifyManager:
             name: str,
             description: str = "Created via discord-spotify-utility"
         ) -> Any | None:
-        """Creates a playlist, returns its ID
+        """Creates a playlist, returns its object.
 
         Args:
-            user_id (str): User ID
             name (str): Name of playlist
             description (str, optional): Description of playlist.
-                Defaults to "Created via discord-spotify-utility".
 
         Returns:
             Any | None: Playlist object
@@ -70,6 +81,122 @@ class SpotifyManager:
 
         for i in range(0, len(track_uris), 100):
             self.spotipy.playlist_add_items(playlist_id, list(track_uris)[i:i + 100])
+
+    def sync_metadata(self) -> dict:
+        """Resolve all stored Spotify links to tracks and persist enriched metadata.
+
+        Returns a summary dict: links_processed, track_shares, unique_tracks,
+        unique_artists, unique_albums.
+        """
+        links = self.db.get_all_spotify_links()
+        self.logger.info("Syncing metadata for %s spotify links...", len(links))
+
+        # Phase 1 — resolve each link to a list of (message_id, track_id, type, source_id)
+        pending_shares, all_track_ids = self._resolve_links(links)
+        self.logger.info("Resolved to %s track shares (%s unique tracks).",
+                         len(pending_shares), len(all_track_ids))
+
+        # Phase 2 — fetch raw track data in batches of 50
+        track_data = self._fetch_track_data(all_track_ids)
+
+        all_artist_ids = {a["id"] for t in track_data.values() for a in t.get("artists", [])}
+        all_album_ids = {
+            t["album"]["id"] for t in track_data.values() if t.get("album")
+        }
+
+        # Phase 3 — upsert artists first (tracks link to them)
+        self._upsert_artists(all_artist_ids)
+
+        # Phase 4 — upsert albums
+        self._upsert_albums(all_album_ids)
+
+        # Phase 5 — upsert tracks (artists + albums are in DB now)
+        for t in track_data.values():
+            self.db.upsert_track(TrackData(
+                track_id=t["id"],
+                name=t["name"],
+                album_id=t["album"]["id"] if t.get("album") else None,
+                artist_ids=[a["id"] for a in t.get("artists", [])],
+                raw_data=_slim_track(t),
+            ))
+
+        # Phase 6 — record track shares
+        for message_id, track_id, source_type, source_id in pending_shares:
+            self.db.record_track_share(message_id, track_id, source_type, source_id)
+
+        self.logger.info("Sync complete.")
+        return {
+            "links_processed": len(links),
+            "track_shares": len(pending_shares),
+            "unique_tracks": len(all_track_ids),
+            "unique_artists": len(all_artist_ids),
+            "unique_albums": len(all_album_ids),
+        }
+
+    # --- Private helpers ---
+
+    def _resolve_links(
+        self, links: list[tuple]
+    ) -> tuple[list[tuple], set[str]]:
+        """Resolve raw spotify link rows to (message_id, track_id, source_type, source_id).
+
+        Returns (pending_shares list, all_track_ids set).
+        """
+        pending_shares = []
+        all_track_ids: set[str] = set()
+
+        for message_id, _url, resource_type, resource_id in links:
+            track_ids = self._resolve_link_to_track_ids(resource_type, resource_id)
+            for track_id in track_ids:
+                pending_shares.append((message_id, track_id, resource_type, resource_id))
+                all_track_ids.add(track_id)
+
+        return pending_shares, all_track_ids
+
+    def _resolve_link_to_track_ids(
+        self, resource_type: str | None, resource_id: str | None
+    ) -> list[str]:
+        """Return track IDs for a single spotify link."""
+        if not resource_type or not resource_id:
+            return []
+        if resource_type == "track":
+            return [resource_id]
+        if resource_type == "album":
+            return [uri.split(":")[-1] for uri in self._collect_album_track_uris(resource_id)]
+        if resource_type == "playlist":
+            return [uri.split(":")[-1] for uri in self._collect_playlist_track_uris(resource_id)]
+        return []
+
+    def _fetch_track_data(self, track_ids: set[str]) -> dict[str, dict]:
+        """Batch-fetch raw Spotify track objects (50 per call)."""
+        track_data = {}
+        id_list = list(track_ids)
+        for i in range(0, len(id_list), 50):
+            results = self.spotipy.tracks(id_list[i:i + 50])
+            for t in results.get("tracks") or []:
+                if t:
+                    track_data[t["id"]] = t
+        return track_data
+
+    def _upsert_artists(self, artist_ids: set[str]) -> None:
+        """Batch-fetch and upsert artist metadata (50 per call)."""
+        id_list = list(artist_ids)
+        for i in range(0, len(id_list), 50):
+            results = self.spotipy.artists(id_list[i:i + 50])
+            for a in results.get("artists") or []:
+                if a:
+                    self.db.upsert_artist(a["id"], a["name"], a.get("genres", []),
+                                          raw_data=_slim_artist(a))
+
+    def _upsert_albums(self, album_ids: set[str]) -> None:
+        """Batch-fetch and upsert album metadata (20 per call)."""
+        id_list = list(album_ids)
+        for i in range(0, len(id_list), 20):
+            results = self.spotipy.albums(id_list[i:i + 20])
+            for a in results.get("albums") or []:
+                if a:
+                    self.db.upsert_album(a["id"], a["name"], a.get("genres", []),
+                                         raw_data=_slim_album(a))
 
     def _get_deduped_track_uris_from_urls(self, track_urls: List[str]) -> Set[str]:
         track_uris: Set[str] = set()
