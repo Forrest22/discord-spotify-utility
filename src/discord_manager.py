@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from db_manager import DBManager, MessageRecord
 from spotify_manager import SpotifyManager
-from stats_manager import StatsManager
+from stats_manager import StatsManager, period_cutoff
 from utils import remove_query_params, parse_spotify_url
 from viz import render_genre_cloud
 
@@ -65,15 +65,20 @@ class DiscordManager(discord.Client):
             await self._help_command(interaction)
 
         @self.tree.command(
-            name="create_spotify_playlist",
-            description="Scan this channel for Spotify URLs and compile them into a playlist",
+            name="scan",
+            description="Scan this channel for Spotify links and record them to the database",
         )
-        @discord.app_commands.describe(limit="Max messages to scan (default 1000, pass 0 for all)")
-        async def create_spotify_playlist(
-            interaction: discord.Interaction, limit: int = 1000
+        @discord.app_commands.describe(
+            limit="Max messages to scan (default 1000, pass 0 for all)",
+            period="Only scan messages from this time period (default: all time)",
+        )
+        async def scan_command(
+            interaction: discord.Interaction,
+            limit: int = 1000,
+            period: Literal["day", "week", "month", "year", "all"] = "all",
         ) -> None:
             actual_limit = limit if limit > 0 else None
-            await self._create_spotify_playlist(interaction, actual_limit)
+            await self._scan(interaction, actual_limit, period)
 
         @self.tree.command(
             name="sync_metadata",
@@ -81,6 +86,19 @@ class DiscordManager(discord.Client):
         )
         async def sync_metadata(interaction: discord.Interaction) -> None:
             await self._sync_metadata_command(interaction)
+
+        @self.tree.command(
+            name="build_playlist",
+            description="Build a Spotify playlist from previously scanned links",
+        )
+        @discord.app_commands.describe(
+            period="Only include links shared during this time period (default: all time)",
+        )
+        async def build_playlist_command(
+            interaction: discord.Interaction,
+            period: Literal["day", "week", "month", "year", "all"] = "all",
+        ) -> None:
+            await self._build_playlist(interaction, period)
 
         @self.tree.command(
             name="stats",
@@ -131,10 +149,13 @@ class DiscordManager(discord.Client):
             embed.add_field(name=f"/{cmd.name}", value=cmd.description, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def _create_spotify_playlist(
-        self, interaction: discord.Interaction, limit: int | None = None
+    async def _scan(
+        self,
+        interaction: discord.Interaction,
+        limit: int | None = None,
+        period: str = "all",
     ) -> None:
-        """Scan the current channel for Spotify URLs and compile them into a playlist."""
+        """Scan the current channel for Spotify links and record them to the database."""
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
             await interaction.response.send_message(
                 "This command can only be used in a server text channel.", ephemeral=True
@@ -151,35 +172,33 @@ class DiscordManager(discord.Client):
 
         async with self._scan_lock:
             try:
-                await self.__run_playlist_scan(interaction, limit)
+                await self.__run_scan(interaction, limit, period)
             except discord.HTTPException as e:
-                self.logger.exception("Discord API error in playlist scan: %s", e)
+                self.logger.exception("Discord API error in scan: %s", e)
                 await interaction.followup.send(
                     "❌ Discord API error — the bot may have lost channel permissions."
                 )
-            except spotipy.SpotifyException as e:
-                self.logger.exception("Spotify API error in playlist scan: %s", e)
-                await interaction.followup.send(
-                    "❌ Spotify API error — check that the bot's Spotify token is still valid."
-                )
             except SQLAlchemyError as e:
-                self.logger.exception("Database error in playlist scan: %s", e)
+                self.logger.exception("Database error in scan: %s", e)
                 await interaction.followup.send(
                     "❌ Database error while recording messages."
                 )
 
-    async def __run_playlist_scan(
-        self, interaction: discord.Interaction, limit: int | None
+    async def __run_scan(
+        self, interaction: discord.Interaction, limit: int | None, period: str
     ) -> None:
-        """Core logic for the playlist scan (called while lock is held)."""
+        """Core scan logic: record link-bearing, non-bot messages (called while lock is held)."""
         channel = interaction.channel
+        cutoff = period_cutoff(period)  # type: ignore[arg-type]
         spotify_urls: set[str] = set()
         contributors: set[int] = set()
         message_count = 0
         url_counts: dict[str, int] = {"track": 0, "album": 0, "playlist": 0}
 
-        self.logger.info("Scanning channel '%s' (ID: %s) for Spotify URLs. Limit=%s",
-                         channel, channel.id, limit)
+        self.logger.info(
+            "Scanning channel '%s' (ID: %s) for Spotify URLs. Limit=%s, period=%s",
+            channel, channel.id, limit, period,
+        )
 
         self.db.get_or_create_guild(
             guild_id=interaction.guild.id,
@@ -197,14 +216,18 @@ class DiscordManager(discord.Client):
             content=f"🔍 Scanning **#{channel.name}**… 0 messages scanned · 0 links found"
         )
 
-        async for message in channel.history(limit=limit):
+        async for message in channel.history(limit=limit, after=cutoff):
+            message_count += 1
+
+            # Skip our own bot's messages
+            if message.author.id == self.user.id:
+                continue
+
             matches = self.SPOTIFY_URL_PATTERN.findall(message.content)
-            for url in matches:
-                clean = remove_query_params(url)
-                spotify_urls.add(clean)
-                rt = parse_spotify_url(clean)[0]
-                if rt in url_counts:
-                    url_counts[rt] += 1
+            if not matches:
+                continue  # only record messages that contain at least one Spotify link
+
+            self.__tally_urls(matches, url_counts, spotify_urls)
 
             contributors.add(message.author.id)
             self.db.get_or_create_discord_user(
@@ -221,7 +244,7 @@ class DiscordManager(discord.Client):
                 raw_data=_message_to_dict(message),
                 spotify_urls=[remove_query_params(u) for u in matches],
             ))
-            message_count += 1
+
             if message_count % 100 == 0:
                 self.logger.info(
                     "Scanned %s messages, %s URLs...", message_count, len(spotify_urls)
@@ -236,7 +259,7 @@ class DiscordManager(discord.Client):
 
         if not spotify_urls:
             await interaction.edit_original_response(
-                content="No Spotify URLs found in this channel."
+                content="No Spotify links found in this channel for the selected period."
             )
             return
 
@@ -245,15 +268,84 @@ class DiscordManager(discord.Client):
             "contributors": len(contributors),
             "url_counts": url_counts,
         }
-        await self.__post_playlist(interaction, spotify_urls, scan_counts)
+        await self.__post_scan_summary(interaction, scan_counts, len(spotify_urls))
 
-    async def __post_playlist(
+    def __tally_urls(
+        self,
+        matches: list[str],
+        url_counts: dict[str, int],
+        spotify_urls: set[str],
+    ) -> None:
+        """Clean and deduplicate matched URLs, adding them to spotify_urls and url_counts."""
+        for url in matches:
+            clean = remove_query_params(url)
+            spotify_urls.add(clean)
+            resource_type = parse_spotify_url(clean)[0]
+            if resource_type in url_counts:
+                url_counts[resource_type] += 1
+
+    async def __post_scan_summary(
         self,
         interaction: discord.Interaction,
-        spotify_urls: set[str],
         scan_counts: dict,
+        link_count: int,
     ) -> None:
-        """Create the Spotify playlist and post the completion embed."""
+        """Post the scan completion embed."""
+        url_counts = scan_counts["url_counts"]
+        embed = discord.Embed(title="✅ Scan Complete", color=discord.Color.green())
+        embed.add_field(
+            name="Messages scanned", value=f"{scan_counts['message_count']:,}", inline=True
+        )
+        embed.add_field(name="Links found", value=f"{link_count:,}", inline=True)
+        embed.add_field(
+            name="Contributors", value=str(scan_counts["contributors"]), inline=True
+        )
+        embed.add_field(
+            name="Breakdown",
+            value=(
+                f"{url_counts['track']} tracks · "
+                f"{url_counts['album']} albums · "
+                f"{url_counts['playlist']} playlists"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Run /sync_metadata to enrich, then /stats, /genre_cloud, or /build_playlist.")
+        await interaction.edit_original_response(content=None, embed=embed)
+
+    async def _build_playlist(
+        self, interaction: discord.Interaction, period: str = "all"
+    ) -> None:
+        """Build a Spotify playlist from previously scanned links for this channel."""
+        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "This command can only be used in a server text channel.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+
+        cutoff = period_cutoff(period)  # type: ignore[arg-type]
+        loop = asyncio.get_running_loop()
+        try:
+            urls = await loop.run_in_executor(
+                None,
+                self.db.get_spotify_urls_for_channel,
+                interaction.channel.id,
+                cutoff,
+            )
+        except SQLAlchemyError as e:
+            self.logger.exception("Database error fetching URLs for playlist: %s", e)
+            await interaction.followup.send("❌ Database error while fetching scanned links.")
+            return
+
+        if not urls:
+            period_label = period.capitalize() if period != "all" else "all time"
+            await interaction.followup.send(
+                f"No scanned links found for this channel ({period_label}). "
+                "Run `/scan` first to record Spotify links."
+            )
+            return
+
         playlist_name = f"{interaction.guild.name} jams | DSU"
         playlist_description = (
             f"Spotify jams from {interaction.guild.name} · "
@@ -261,40 +353,30 @@ class DiscordManager(discord.Client):
             f"{datetime.today().strftime('%Y-%m-%d')} · "
             "https://github.com/Forrest22/discord-spotify-utility"
         )
-        await interaction.edit_original_response(content="🎵 Building playlist on Spotify…")
-        loop = asyncio.get_running_loop()
-        playlist = await loop.run_in_executor(
-            None, self.spotify_manager.create_playlist, playlist_name, playlist_description
-        )
-        await loop.run_in_executor(
-            None, self.spotify_manager.add_tracks_to_playlist, playlist["id"], spotify_urls
-        )
-        url_counts = scan_counts["url_counts"]
+        try:
+            playlist = await loop.run_in_executor(
+                None, self.spotify_manager.create_playlist, playlist_name, playlist_description
+            )
+            await loop.run_in_executor(
+                None, self.spotify_manager.add_tracks_to_playlist, playlist["id"], urls
+            )
+        except spotipy.SpotifyException as e:
+            self.logger.exception("Spotify API error building playlist: %s", e)
+            await interaction.followup.send(
+                "❌ Spotify API error — check that the bot's Spotify token is still valid."
+            )
+            return
+
         embed = discord.Embed(
             title="✅ Playlist Created",
             url=playlist["external_urls"]["spotify"],
             color=discord.Color.green(),
         )
-        embed.add_field(
-            name="Messages scanned", value=f"{scan_counts['message_count']:,}", inline=True
-        )
-        embed.add_field(name="Links found", value=str(len(spotify_urls)), inline=True)
-        embed.add_field(
-            name="Contributors", value=str(scan_counts["contributors"]), inline=True
-        )
-        embed.add_field(
-            name="Breakdown",
-            value=(
-                f"🎵 {url_counts['track']} tracks · "
-                f"💿 {url_counts['album']} albums · "
-                f"📋 {url_counts['playlist']} playlists"
-            ),
-            inline=False,
-        )
+        embed.add_field(name="Links added", value=f"{len(urls):,}", inline=True)
         embed.add_field(
             name="Playlist", value=playlist["external_urls"]["spotify"], inline=False
         )
-        await interaction.edit_original_response(content=None, embed=embed)
+        await interaction.followup.send(embed=embed)
         self.logger.info("Created playlist: %s", playlist["external_urls"]["spotify"])
 
     async def _sync_metadata_command(self, interaction: discord.Interaction) -> None:
@@ -337,15 +419,12 @@ class DiscordManager(discord.Client):
             if stat_type == "song":
                 results = self.stats_manager.top_tracks(period)  # type: ignore[arg-type]
                 label = "Songs"
-                emoji = "🎵"
             elif stat_type == "album":
                 results = self.stats_manager.top_albums(period)  # type: ignore[arg-type]
                 label = "Albums"
-                emoji = "💿"
             else:
                 results = self.stats_manager.top_artists(period)  # type: ignore[arg-type]
                 label = "Artists"
-                emoji = "🎤"
         except SQLAlchemyError as e:
             self.logger.exception("DB error in stats: %s", e)
             await interaction.followup.send("❌ Database error fetching stats.")
@@ -360,7 +439,7 @@ class DiscordManager(discord.Client):
 
         period_label = period.capitalize() if period != "all" else "All time"
         embed = discord.Embed(
-            title=f"{emoji} Top {label} — {period_label}",
+            title=f"Top {label} — {period_label}",
             color=discord.Color.blurple(),
         )
         lines = []
@@ -393,7 +472,7 @@ class DiscordManager(discord.Client):
 
         period_label = period.capitalize() if period != "all" else "All time"
         embed = discord.Embed(
-            title=f"🎨 Genre Cloud — {period_label}",
+            title=f"Genre Cloud — {period_label}",
             color=discord.Color.purple(),
         )
         embed.set_footer(text=f"Based on {sum(freqs.values()):,} genre-share data points")

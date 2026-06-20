@@ -26,7 +26,7 @@ There is no test suite.
 
 ## Architecture
 
-The bot is a Discord client that scans channel history for Spotify URLs, consolidates them into playlists, and provides music statistics and genre visualizations. Entry point is `src/main.py`.
+The bot is a Discord client that scans channel history for Spotify URLs, persists them to a database, enriches them with track/artist/genre metadata, and provides music statistics and genre visualizations. Creating a Spotify playlist is optional. Entry point is `src/main.py`.
 
 **Dependency flow:**
 ```
@@ -37,12 +37,13 @@ main.py
   └─ DiscordManager     (discord.py subclass, holds all three above)
 ```
 
-**Bot workflow — commands must run in this order:**
-1. `/create_spotify_playlist` — scans channel history, records messages + Spotify links to DB, creates a Spotify playlist
+**Bot workflow:**
+1. `/scan [limit] [period]` — scans channel history, records non-bot messages that contain Spotify links to DB. `period` filters by message date (`day|week|month|year|all`, default `all`).
 2. `/sync_metadata` — enriches stored links: resolves albums/playlists to individual tracks, batch-fetches track/artist/album metadata from Spotify API, persists genres
-3. `/stats` and `/genre_cloud` — query the enriched data (no data until step 2 runs)
+3. `/stats [type] [period]` and `/genre_cloud [period]` — query the enriched data (no data until step 2 runs)
+4. `/build_playlist [period]` — **optional** — builds a Spotify playlist from previously scanned links for this channel, optionally filtered by period
 
-**`DiscordManager` (`src/discord_manager.py`)** subclasses `discord.Client` directly. Slash commands are defined inside `setup_hook()` as nested functions and synced to each guild in `GUILD_IDS`. All blocking Spotify and DB calls run in a thread executor via `asyncio.get_running_loop().run_in_executor()` to avoid blocking the asyncio event loop. An `asyncio.Lock` class variable (`_scan_lock`) prevents overlapping scans. `/help` auto-generates from `self.tree.get_commands()`.
+**`DiscordManager` (`src/discord_manager.py`)** subclasses `discord.Client` directly. Slash commands are defined inside `setup_hook()` as nested functions and synced to each guild in `GUILD_IDS`. All blocking Spotify and DB calls run in a thread executor via `asyncio.get_running_loop().run_in_executor()` to avoid blocking the asyncio event loop. An `asyncio.Lock` class variable (`_scan_lock`) prevents overlapping scans. `/help` auto-generates from `self.tree.get_commands()`. `/scan` skips the bot's own messages and messages with no Spotify links, so only real shared links land in the DB.
 
 **`SpotifyManager` (`src/spotify_manager.py`)** wraps spotipy. `add_tracks_to_playlist` resolves mixed track/album/playlist URLs to individual URIs and batches `playlist_add_items` in chunks of 100 (Spotify API limit). `sync_metadata()` is the enrichment pipeline: resolves all stored `SpotifyLink` rows to track IDs, then batch-fetches track (`sp.tracks`, 50/call), artist (`sp.artists`, 50/call), and album metadata (`sp.albums`, 20/call), upserts them to the DB in dependency order (artists → albums → tracks → track_shares).
 

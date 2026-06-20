@@ -9,3 +9,4 @@ my-venv/
 output.txt
 *.dsm
 *.db
+storage/*

@@ -254,15 +254,25 @@ class DBManager:
                     resource_id=resource_id,
                 ))
 
-    def get_spotify_links_for_channel(self, channel_id: int) -> list[SpotifyLink]:
-        """Returns a list of spotify links for given channel_id"""
+    def get_spotify_urls_for_channel(
+        self,
+        channel_id: int,
+        cutoff: datetime | None = None,
+    ) -> list[str]:
+        """Return Spotify URL strings for a channel, optionally filtered by message date.
+
+        Returns plain strings (not ORM objects) so they are safe to use after the
+        session closes.
+        """
         with self.session() as s:
-            return (
-                s.query(SpotifyLink)
+            q = (
+                s.query(SpotifyLink.url)
                 .join(Message)
                 .filter(Message.channel_id == channel_id)
-                .all()
             )
+            if cutoff is not None:
+                q = q.filter(Message.created_at >= cutoff)
+            return [row[0] for row in q.all()]
 
     def get_all_spotify_links(self) -> list[tuple]:
         """Return (message_id, url, resource_type, resource_id) tuples for all spotify links."""
