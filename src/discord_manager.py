@@ -12,10 +12,57 @@ import spotipy
 from sqlalchemy.exc import SQLAlchemyError
 
 from db_manager import DBManager, MessageRecord
+from music_manager import MusicManager
 from spotify_manager import SpotifyManager
 from stats_manager import StatsManager, period_cutoff
 from utils import remove_query_params, parse_spotify_url
 from viz import render_genre_cloud
+
+
+class ConfirmView(discord.ui.View):
+    """Confirmation prompt for /play and /playnext before tracks are queued."""
+
+    def __init__(self, requester_id: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.confirmed: bool = False
+        self.message: discord.WebhookMessage | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who requested this can confirm or cancel.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        if self.message:
+            await self.message.edit(content="Request timed out.", embed=None, view=None)
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Mark as confirmed and defer the button interaction."""
+        # pylint: disable=unused-argument
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Stop the view and edit the message to show cancellation."""
+        # pylint: disable=unused-argument
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
+
+
+@dataclass
+class DiscordManagerDeps:
+    """Collaborator managers injected into DiscordManager."""
+    db: DBManager
+    spotify_manager: SpotifyManager
+    stats_manager: StatsManager
+    music_manager: MusicManager
 
 
 @dataclass
@@ -23,7 +70,6 @@ class DiscordManagerSettings:
     """Settings for initializing DiscordManager"""
     target_channel: str
     guild_ids: List[int]
-    user_id: str
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -35,26 +81,21 @@ class DiscordManager(discord.Client):
     SPOTIFY_URL_PATTERN = re.compile(r"(https?://open\.spotify\.com/[^\s]+)")
     _scan_lock = asyncio.Lock()
 
-    def __init__(
-        self,
-        db: DBManager,
-        spotify_manager: SpotifyManager,
-        stats_manager: StatsManager,
-        discord_settings: DiscordManagerSettings,
-    ):
+    def __init__(self, deps: DiscordManagerDeps, discord_settings: DiscordManagerSettings):
         self.logger = logging.getLogger("discord-spotify-util.discord")
 
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.voice_states = True
         super().__init__(intents=intents, **discord_settings.options)
 
-        self.db = db
-        self.spotify_manager = spotify_manager
-        self.stats_manager = stats_manager
+        self.db = deps.db
+        self.spotify_manager = deps.spotify_manager
+        self.stats_manager = deps.stats_manager
+        self.music_manager = deps.music_manager
         self.discord_guilds = [
             discord.Object(id=guild_id) for guild_id in discord_settings.guild_ids
         ]
-        self.user_id = discord_settings.user_id
         self.tree = discord.app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
@@ -125,6 +166,41 @@ class DiscordManager(discord.Client):
             period: Literal["day", "week", "month", "year", "all"] = "all",
         ) -> None:
             await self._genre_cloud_command(interaction, period)
+
+        @self.tree.command(
+            name="play",
+            description="Play a song, album, playlist, or artist mix in your voice channel",
+        )
+        @discord.app_commands.describe(query="Spotify URL, YouTube URL, or search text")
+        async def play_command(interaction: discord.Interaction, query: str) -> None:
+            await self._play_or_next_command(interaction, query, front=False)
+
+        @self.tree.command(
+            name="playnext",
+            description="Queue a track or album to play immediately after the current one",
+        )
+        @discord.app_commands.describe(query="Spotify URL, YouTube URL, or search text")
+        async def playnext_command(interaction: discord.Interaction, query: str) -> None:
+            await self._play_or_next_command(interaction, query, front=True)
+
+        @self.tree.command(name="pause", description="Pause or resume the current track")
+        async def pause_command(interaction: discord.Interaction) -> None:
+            await self._pause_command(interaction)
+
+        @self.tree.command(name="stop", description="Stop playback and disconnect the bot")
+        async def stop_command(interaction: discord.Interaction) -> None:
+            await self._stop_command(interaction)
+
+        @self.tree.command(name="shuffle", description="Shuffle the current queue")
+        async def shuffle_command(interaction: discord.Interaction) -> None:
+            await self._shuffle_command(interaction)
+
+        @self.tree.command(
+            name="clear",
+            description="Clear the queue without stopping the current track",
+        )
+        async def clear_command(interaction: discord.Interaction) -> None:
+            await self._clear_command(interaction)
 
         for guild in self.discord_guilds:
             self.tree.copy_global_to(guild=guild)
@@ -309,7 +385,9 @@ class DiscordManager(discord.Client):
             ),
             inline=False,
         )
-        embed.set_footer(text="Run /sync_metadata to enrich, then /stats, /genre_cloud, or /build_playlist.")
+        embed.set_footer(
+            text="Run /sync_metadata to enrich, then /stats, /genre_cloud, or /build_playlist."
+        )
         await interaction.edit_original_response(content=None, embed=embed)
 
     async def _build_playlist(
@@ -481,7 +559,114 @@ class DiscordManager(discord.Client):
         )
 
 
-# --- Discord object serialisation helpers ---
+    # --- Music command implementations ---
+
+    async def __check_music_perms(self, interaction: discord.Interaction) -> bool:
+        """Return True if the member may use music commands; send an ephemeral error otherwise."""
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message(
+                "Music commands can only be used in a server.", ephemeral=True
+            )
+            return False
+        dj_role = self.music_manager.dj_role_name
+        if not discord.utils.get(member.roles, name=dj_role):
+            await interaction.response.send_message(
+                f"You need the **{dj_role}** role to use music commands.",
+                ephemeral=True,
+            )
+            return False
+        if not member.voice or not member.voice.channel:
+            await interaction.response.send_message(
+                "You need to be in a voice channel to use music commands.", ephemeral=True
+            )
+            return False
+        guild_vc = interaction.guild.voice_client if interaction.guild else None
+        if guild_vc and member.voice.channel.id != guild_vc.channel.id:
+            await interaction.response.send_message(
+                "You need to be in the same voice channel as the bot.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _play_or_next_command(
+        self, interaction: discord.Interaction, query: str, front: bool
+    ) -> None:
+        """Shared handler for /play and /playnext."""
+        if not await self.__check_music_perms(interaction):
+            return
+        await interaction.response.defer()
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, self.music_manager.resolve, query)
+
+        if not result.tracks:
+            await interaction.followup.send(f"No results found for **{query}**.")
+            return
+
+        embed = discord.Embed(description=result.description, color=discord.Color.blurple())
+        embed.set_footer(text=f"{len(result.tracks)} track(s) · Confirm to queue")
+        view = ConfirmView(requester_id=interaction.user.id)
+        msg = await interaction.followup.send(embed=embed, view=view)
+        view.message = msg
+
+        await view.wait()
+        if not view.confirmed:
+            return  # cancel or timeout already edited the message
+
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not member.voice or not member.voice.channel:
+            await interaction.followup.send(
+                "You're no longer in a voice channel.", ephemeral=True
+            )
+            return
+
+        for track in result.tracks:
+            track.requested_by = member.display_name
+
+        guild_id = interaction.guild_id
+        await self.music_manager.ensure_connected(member.voice.channel)
+        self.music_manager.enqueue(guild_id, result.tracks, front=front)
+        await self.music_manager.start(guild_id)
+
+        if len(result.tracks) == 1:
+            added = f"✅ Added **{result.tracks[0].title}** to the queue."
+        else:
+            added = f"✅ Added {len(result.tracks)} tracks to the queue."
+        await msg.edit(content=added, embed=None, view=None)
+
+    async def _pause_command(self, interaction: discord.Interaction) -> None:
+        """Toggle pause/resume for the current track."""
+        if not await self.__check_music_perms(interaction):
+            return
+        guild_vc = interaction.guild.voice_client if interaction.guild else None
+        is_playing = guild_vc is not None and guild_vc.is_playing()
+        self.music_manager.pause(interaction.guild_id)
+        label = "Paused." if is_playing else "Resumed."
+        await interaction.response.send_message(label, ephemeral=True)
+
+    async def _stop_command(self, interaction: discord.Interaction) -> None:
+        """Stop playback and disconnect the bot."""
+        if not await self.__check_music_perms(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        await self.music_manager.stop(interaction.guild_id)
+        await interaction.followup.send("Stopped playback and disconnected.")
+
+    async def _shuffle_command(self, interaction: discord.Interaction) -> None:
+        """Shuffle the current queue."""
+        if not await self.__check_music_perms(interaction):
+            return
+        self.music_manager.shuffle(interaction.guild_id)
+        await interaction.response.send_message("Queue shuffled.", ephemeral=True)
+
+    async def _clear_command(self, interaction: discord.Interaction) -> None:
+        """Clear the queue without stopping the current track."""
+        if not await self.__check_music_perms(interaction):
+            return
+        self.music_manager.clear(interaction.guild_id)
+        await interaction.response.send_message("Queue cleared.", ephemeral=True)
+
+    # --- Discord object serialisation helpers ---
 
 def _guild_to_dict(guild: discord.Guild) -> dict:
     return {

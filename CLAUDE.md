@@ -12,6 +12,15 @@ pip install -r requirements.txt   # install dependencies
 cp .env.example .env              # then fill in your credentials
 ```
 
+**System dependencies (voice playback)**
+```bash
+sudo apt install ffmpeg libopus0  # FFmpeg (audio processing) + Opus codec
+```
+`ffmpeg` and `libopus0` are not pip packages. `libopus0` is usually pre-installed
+but may be missing on minimal hosts. `yt-dlp` (in requirements.txt) needs
+occasional version bumps when YouTube changes its extraction — update the pin in
+`requirements.txt` and reinstall when audio stops working.
+
 **Run**
 ```bash
 python src/main.py

@@ -133,6 +133,81 @@ class SpotifyManager:
             "unique_albums": len(all_album_ids),
         }
 
+    # --- Music playback metadata helpers ---
+
+    def get_search_queries(
+        self, resource_type: str, resource_id: str
+    ) -> list[tuple[str, str]]:
+        """Return (title, primary_artist) pairs for a Spotify resource.
+
+        Used by MusicManager to build YouTube search queries without calling yt-dlp
+        up front for every track in an album or playlist.
+        """
+        if resource_type == "track":
+            t = self.spotipy.track(resource_id)
+            artist = t["artists"][0]["name"] if t.get("artists") else ""
+            return [(t["name"], artist)]
+        if resource_type == "album":
+            return self._album_track_pairs(resource_id)
+        if resource_type == "playlist":
+            return self._playlist_track_pairs(resource_id)
+        if resource_type == "artist":
+            results = self.spotipy.artist_top_tracks(resource_id)
+            return [
+                (t["name"], t["artists"][0]["name"] if t.get("artists") else "")
+                for t in results.get("tracks", [])
+            ]
+        return []
+
+    def get_resource_name(self, resource_type: str, resource_id: str) -> str:
+        """Return a human-readable display name for a Spotify resource."""
+        if resource_type == "track":
+            t = self.spotipy.track(resource_id)
+            artist = t["artists"][0]["name"] if t.get("artists") else ""
+            return f"{t['name']} — {artist}" if artist else t["name"]
+        if resource_type == "album":
+            return self.spotipy.album(resource_id)["name"]
+        if resource_type == "playlist":
+            return self.spotipy.playlist(resource_id, fields="name")["name"]
+        if resource_type == "artist":
+            return self.spotipy.artist(resource_id)["name"]
+        return resource_id
+
+    def _album_track_pairs(self, album_id: str) -> list[tuple[str, str]]:
+        """Paginate album tracks and return (title, primary_artist) pairs."""
+        pairs: list[tuple[str, str]] = []
+        results = self.spotipy.album_tracks(album_id)
+        while True:
+            for t in results["items"]:
+                artist = t["artists"][0]["name"] if t.get("artists") else ""
+                pairs.append((t["name"], artist))
+            if not results["next"]:
+                break
+            results = self.spotipy.next(results)
+        return pairs
+
+    def _playlist_track_pairs(self, playlist_id: str) -> list[tuple[str, str]]:
+        """Paginate playlist items and return (title, primary_artist) pairs."""
+        pairs: list[tuple[str, str]] = []
+        try:
+            results = self.spotipy.playlist_items(playlist_id)
+            while True:
+                for item in results["items"]:
+                    t = item.get("track")
+                    if not t or not t.get("id"):
+                        continue  # skip local/deleted tracks
+                    artist = t["artists"][0]["name"] if t.get("artists") else ""
+                    pairs.append((t["name"], artist))
+                if not results["next"]:
+                    break
+                results = self.spotipy.next(results)
+        except spotipy.SpotifyException as e:
+            if e.http_status == 404:
+                self.logger.warning("Skipping inaccessible playlist %s: %s", playlist_id, e)
+            else:
+                raise
+        return pairs
+
     # --- Private helpers ---
 
     def _resolve_links(

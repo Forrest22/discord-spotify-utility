@@ -3,12 +3,13 @@ import logging
 from os import getenv
 
 LOGGER_COLORS = {
-    "discord-spotify-util.spotify": "\033[32m",  # green
-    "discord-spotify-util.discord": "\033[36m",  # cyan
-    "discord-spotify-util.db":      "\033[34m",  # blue
-    "discord.client":               "\033[35m",  # purple
-    "discord.gateway":              "\033[35m",  # purple
-    "discord.http":                 "\033[35m",  # purple
+    "discord-spotify-util.spotify": "\033[32m",   # green
+    "discord-spotify-util.discord": "\033[36m",   # cyan
+    "discord-spotify-util.db":      "\033[34m",   # blue
+    "discord-spotify-util.music":   "\033[95m",   # bright magenta
+    "discord.client":               "\033[35m",   # purple
+    "discord.gateway":              "\033[35m",   # purple
+    "discord.http":                 "\033[35m",   # purple
 }
 
 LEVEL_COLORS = {
