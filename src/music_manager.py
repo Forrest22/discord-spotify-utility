@@ -4,6 +4,7 @@ import logging
 import random
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 
 import discord
 import yt_dlp
@@ -226,6 +227,70 @@ class MusicManager:
         player.voice_client.stop()   # fires after-callback; leaving=True makes it a no-op
         await player.voice_client.disconnect()
         self._players.pop(guild_id, None)
+
+    def is_active(self, guild_id: int) -> bool:
+        """Return True if the guild has an active player (playing, paused, or queued)."""
+        player = self._players.get(guild_id)
+        return bool(
+            player
+            and player.voice_client.is_connected()
+            and not player.leaving
+        )
+
+    async def play_track(
+        self,
+        guild_id: int,
+        search_query: str,
+        *,
+        on_finished: "Callable[[], None]",
+    ) -> None:
+        """Play a single track for trivia — bypasses the normal queue.
+
+        Connects to the guild's existing voice client (must already be connected via
+        ensure_connected). Calls on_finished from the FFmpeg after-callback when the
+        track ends naturally or is stopped. on_finished is called from FFmpeg's thread;
+        callers must use run_coroutine_threadsafe to schedule any async work.
+        """
+        self._loop = asyncio.get_running_loop()
+        player = self._players.get(guild_id)
+        if not player or not player.voice_client.is_connected():
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            stream_url = await loop.run_in_executor(
+                None, self._get_stream_url, search_query
+            )
+        except Exception as err:  # pylint: disable=broad-except
+            self.logger.error("Trivia: failed to resolve stream for '%s': %s", search_query, err)
+            on_finished()
+            return
+
+        if player.leaving or not player.voice_client.is_connected():
+            return
+
+        loudness = self._settings.loudness_i
+        before_opts = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+        audio_opts = f"-vn -af loudnorm=I={loudness}:TP=-1.5:LRA=11,aresample=48000"
+        source = discord.FFmpegOpusAudio(
+            stream_url, before_options=before_opts, options=audio_opts
+        )
+
+        def _after(err: Exception | None) -> None:
+            if err:
+                self.logger.error("Trivia playback error in guild %s: %s", guild_id, err)
+            on_finished()
+
+        player.voice_client.play(source, after=_after)
+        self.logger.info("Trivia: now playing in guild %s: %s", guild_id, search_query)
+
+    async def stop_current(self, guild_id: int) -> None:
+        """Stop the currently playing trivia track without disconnecting or clearing the queue."""
+        player = self._players.get(guild_id)
+        if not player:
+            return
+        if player.voice_client.is_playing() or player.voice_client.is_paused():
+            player.voice_client.stop()  # triggers the after-callback (and thus on_finished)
 
     # --- Private playback internals ---
 

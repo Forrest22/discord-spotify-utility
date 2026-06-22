@@ -50,7 +50,9 @@ main.py
   └─ DBManager          (SQLAlchemy, sqlite by default)
   └─ SpotifyManager     (spotipy wrapper, holds DBManager ref)
   └─ StatsManager       (analytics query layer, holds DBManager ref)
-  └─ DiscordManager     (discord.py subclass, holds all three above)
+  └─ MusicManager       (voice playback, holds SpotifyManager ref)
+  └─ TriviaManager      (trivia game engine, holds DB/Spotify/Music refs)
+  └─ DiscordManager     (discord.py subclass, holds all above via DiscordManagerDeps)
 ```
 
 **Bot workflow:**
@@ -59,18 +61,21 @@ main.py
 2. `/sync_metadata` — enriches stored links: resolves albums/playlists to individual tracks, batch-fetches track/artist/album metadata from Spotify API, persists genres
 3. `/stats [type] [period]` and `/genre_cloud [period]` — query the enriched data (no data until step 2 runs); includes songs played through the bot as well as links shared in chat
 4. `/build_playlist [period]` — **optional** — builds a Spotify playlist from previously scanned links for this channel, optionally filtered by period
+5. `/trivia_start [genre] [rounds] [end_mode] [max_score]` — starts a music trivia game. Bot joins voice, plays songs from Spotify (by genre or all), and players guess title + artist in the text channel. Scoring window is 60s (500 pts in first 5s, decaying to 100 floor). Per-round word-claiming: once a word is scored, it's locked for everyone. Scores persist to `trivia_scores` table and are viewable via `/trivia_scores [days]`.
 
-**`DiscordManager` (`src/discord_manager.py`)** subclasses `discord.Client` directly. Slash commands are defined inside `setup_hook()` as nested functions and synced to each guild in `GUILD_IDS`. All blocking Spotify and DB calls run in a thread executor via `asyncio.get_running_loop().run_in_executor()` to avoid blocking the asyncio event loop. An `asyncio.Lock` class variable (`_scan_lock`) prevents overlapping scans. `/help` auto-generates from `self.tree.get_commands()`, grouping commands by `HELP_CATEGORIES` (any command not listed there falls into an "Other" group, so new commands always appear). `/scan` skips the bot's own messages and messages with no Spotify links, so only real shared links land in the DB.
+**`DiscordManager` (`src/discord_manager.py`)** subclasses `discord.Client` directly. Slash commands are defined inside `setup_hook()` as nested functions (trivia commands registered via `_register_trivia_commands()`) and synced to each guild in `GUILD_IDS`. All blocking Spotify and DB calls run in a thread executor via `asyncio.get_running_loop().run_in_executor()` to avoid blocking the asyncio event loop. An `asyncio.Lock` class variable (`_scan_lock`) prevents overlapping scans. `/help` auto-generates from `self.tree.get_commands()`, grouping commands by `HELP_CATEGORIES` (any command not listed there falls into an "Other" group, so new commands always appear). `/scan` skips the bot's own messages and messages with no Spotify links, so only real shared links land in the DB. `on_message` delegates to `TriviaManager.submit_guess` when a trivia game is active. Manager dependencies are stored as `self._deps: DiscordManagerDeps` and exposed as properties to stay under pylint's instance-attribute limit.
 
 **`SpotifyManager` (`src/spotify_manager.py`)** wraps spotipy. `add_tracks_to_playlist` resolves mixed track/album/playlist URLs to individual URIs and batches `playlist_add_items` in chunks of 100 (Spotify API limit). `sync_metadata()` is the enrichment pipeline: resolves all stored `SpotifyLink` rows to track IDs, then batch-fetches track (`sp.tracks`, 50/call), artist (`sp.artists`, 50/call), and album metadata (`sp.albums`, 20/call), upserts them to the DB in dependency order (artists → albums → tracks → track_shares).
 
+**`TriviaManager` (`src/trivia_manager.py`)** manages per-guild trivia games. Key types: `TriviaSettings` (config), `TriviaGame` (static config + `TriviaSync` + `TriviaProgress`), `TriviaRound` (per-round mutable state). Pure module-level helpers: `normalize_words`, `time_value`, `score_award`. Games run as background `asyncio.Task`s; `submit_guess` is cheap in-memory (no DB I/O on the message path). Scores are persisted once at game end via `db.record_trivia_score`. Music and trivia are mutually exclusive per guild (each checks `is_active`/`has_active_game` on the other).
+
 **`DBManager` (`src/db_manager.py`)** uses SQLAlchemy 2.x with mapped dataclasses. Two layers of models:
 - *Discord layer*: `Guild → Channel → Message → SpotifyLink` (with `DiscordUser` on `Message`)
-- *Enrichment layer*: `Artist`, `Album`, `Track` (linked via `track_artists` M2M association table), `TrackShare` (analytics fact table: one row per message × resolved track)
+- *Enrichment layer*: `Artist`, `Album`, `Track` (linked via `track_artists` M2M association table), `TrackShare` (analytics fact table: one row per message × resolved track), `TriviaScore` (trivia analytics fact: one row per user per completed game)
 
 Every model has a `raw_data: JSON` column. The public `session()` context manager auto-commits or rolls back. All write methods return `None` (not ORM objects) to avoid detached-instance issues across session boundaries. Tables are created automatically on startup. Default DB path is `storage/discord-spotify.db`.
 
-**`StatsManager` (`src/stats_manager.py`)** is a thin query layer. `top_tracks/albums/artists(period, n)` return `list[tuple[name, count]]`. `genre_frequencies(period)` joins `TrackShare → track_artists → Artist.genres`, flattens the JSON genre lists, and returns a `dict[genre, count]`. Period is one of `day|week|month|year|all`.
+**`StatsManager` (`src/stats_manager.py`)** is a thin query layer. `top_tracks/albums/artists(period, n)` return `list[tuple[name, count]]`. `genre_frequencies(period)` joins `TrackShare → track_artists → Artist.genres`, flattens the JSON genre lists, and returns a `dict[genre, count]`. Period is one of `day|week|month|year|all`. `top_trivia_scores(days, n)` aggregates `TriviaScore.points` per user; `days=0` = all time.
 
 **`viz.py`** — `render_genre_cloud(freqs, out_path)` renders a word cloud PNG using the `wordcloud` library. Called in an executor since it's blocking (uses matplotlib/PIL under the hood).
 

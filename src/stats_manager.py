@@ -4,9 +4,13 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Literal
 
+from sqlalchemy import func
 from sqlalchemy.sql.functions import count as count_rows
 
-from db_manager import DBManager, Artist, Album, Track, TrackShare, Message, track_artists
+from db_manager import (
+    DBManager, Artist, Album, Track, TrackShare, Message, track_artists,
+    DiscordUser, TriviaScore,
+)
 
 Period = Literal["day", "week", "month", "year", "all"]
 
@@ -87,6 +91,27 @@ class StatsManager:
             return list(
                 q.group_by(Artist.id, Artist.name)
                 .order_by(cnt.desc())
+                .limit(n)
+                .all()
+            )
+
+    def top_trivia_scores(self, days: int = 1, n: int = 10) -> list[tuple[str, int]]:
+        """Return the n top trivia scorers as (username, total_points) pairs.
+
+        days=0 returns all-time scores; days=1 covers the last 24 hours, etc.
+        """
+        total = func.sum(TriviaScore.points).label("total")
+        with self.db.session() as s:
+            q = (
+                s.query(DiscordUser.username, total)
+                .join(TriviaScore, TriviaScore.user_id == DiscordUser.id)
+            )
+            if days > 0:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                q = q.filter(TriviaScore.created_at >= cutoff)
+            return list(
+                q.group_by(DiscordUser.id, DiscordUser.username)
+                .order_by(total.desc())
                 .limit(n)
                 .all()
             )

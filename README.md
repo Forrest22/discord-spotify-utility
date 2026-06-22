@@ -13,11 +13,7 @@ in voice, too.
 - Renders a genre word cloud so we can see what we're really into
 - Plays music right in the voice channel when we want a DJ
 - Bundles it all into a Spotify playlist whenever we feel like it
-
-## Down the road
-
-A music trivia game is still on my wishlist — play a few seconds of a song and everyone
-races to guess it.
+- Runs a music trivia game where the bot plays songs and everyone races to guess the title and artist
 
 ## Relevant libraries and references
 

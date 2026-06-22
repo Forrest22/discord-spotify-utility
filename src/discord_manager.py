@@ -15,6 +15,7 @@ from db_manager import DBManager, MessageRecord
 from music_manager import MusicManager
 from spotify_manager import SpotifyManager
 from stats_manager import StatsManager, period_cutoff
+from trivia_manager import TriviaManager, TriviaSettings, GuessOutcome, GuessResult
 from utils import remove_query_params, parse_spotify_url
 from viz import render_genre_cloud
 
@@ -61,6 +62,7 @@ class DiscordManagerDeps:
     spotify_manager: SpotifyManager
     stats_manager: StatsManager
     music_manager: MusicManager
+    trivia_manager: TriviaManager
 
 
 @dataclass
@@ -87,14 +89,38 @@ class DiscordManager(discord.Client):
         intents.voice_states = True
         super().__init__(intents=intents, **discord_settings.options)
 
-        self.db = deps.db
-        self.spotify_manager = deps.spotify_manager
-        self.stats_manager = deps.stats_manager
-        self.music_manager = deps.music_manager
+        self._deps = deps
         self.discord_guilds = [
             discord.Object(id=guild_id) for guild_id in discord_settings.guild_ids
         ]
         self.tree = discord.app_commands.CommandTree(self)
+
+    # --- Dependency accessors (properties don't count as instance attrs for R0902) ---
+
+    @property
+    def db(self) -> DBManager:
+        """Database manager."""
+        return self._deps.db
+
+    @property
+    def spotify_manager(self) -> SpotifyManager:
+        """Spotify API manager."""
+        return self._deps.spotify_manager
+
+    @property
+    def stats_manager(self) -> StatsManager:
+        """Analytics query layer."""
+        return self._deps.stats_manager
+
+    @property
+    def music_manager(self) -> MusicManager:
+        """Voice music playback manager."""
+        return self._deps.music_manager
+
+    @property
+    def trivia_manager(self) -> TriviaManager:
+        """Music trivia game manager."""
+        return self._deps.trivia_manager
 
     async def setup_hook(self) -> None:
         """Registers slash commands and syncs them to all configured guilds."""
@@ -200,15 +226,84 @@ class DiscordManager(discord.Client):
         async def clear_command(interaction: discord.Interaction) -> None:
             await self._clear_command(interaction)
 
+        self._register_trivia_commands()
+
         for guild in self.discord_guilds:
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
             self.logger.info("Synced commands %s to guild %s",
                              [s.name for s in synced], guild.id)
 
+    def _register_trivia_commands(self) -> None:
+        """Register trivia slash commands on the command tree."""
+
+        @self.tree.command(
+            name="trivia_start",
+            description="Start a music trivia game in your voice channel",
+        )
+        @discord.app_commands.describe(
+            genre="Spotify genre to pull songs from (leave blank for any genre)",
+            rounds="Number of rounds (default 5)",
+            end_mode="When to advance: after the guess window, or when the song ends",
+            max_score="End the game early when any player reaches this score (0 = disabled)",
+        )
+        async def trivia_start_command(
+            interaction: discord.Interaction,
+            genre: str = "",
+            rounds: int = 5,
+            end_mode: Literal["time", "song_end"] = "time",
+            max_score: int = 0,
+        ) -> None:
+            settings = TriviaSettings(
+                genre=genre,
+                rounds=rounds,
+                end_mode=end_mode,
+                max_score=max_score if max_score > 0 else None,
+            )
+            await self._trivia_start_command(interaction, settings)
+
+        @self.tree.command(name="trivia_skip", description="Skip to the next trivia round")
+        async def trivia_skip_command(interaction: discord.Interaction) -> None:
+            await self._trivia_skip_command(interaction)
+
+        @self.tree.command(name="trivia_stop", description="Stop the current trivia game")
+        async def trivia_stop_command(interaction: discord.Interaction) -> None:
+            await self._trivia_stop_command(interaction)
+
+        @self.tree.command(name="trivia_scores", description="Show the trivia leaderboard")
+        @discord.app_commands.describe(
+            days="How many days to look back (0 = all time, default 1)",
+        )
+        async def trivia_scores_command(
+            interaction: discord.Interaction, days: int = 1
+        ) -> None:
+            await self._trivia_scores_command(interaction, days)
+
     async def on_ready(self) -> None:
         """Signals that the connection to Discord is established."""
         self.logger.info("Connected guilds: %s", [g.id for g in self.guilds])
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Delegate messages to the trivia engine when a game is active."""
+        if not message.guild or message.author.id == self.user.id:
+            return
+        outcome: GuessOutcome | None = await self.trivia_manager.submit_guess(message)
+        if outcome is None:
+            return
+        if outcome.kind == GuessResult.WRONG:
+            try:
+                await message.add_reaction("❌")
+            except discord.HTTPException:
+                pass
+        elif outcome.kind == GuessResult.PARTIAL:
+            await message.channel.send(
+                f"**{outcome.username}** got {outcome.newly_claimed}/{outcome.total_words}"
+                f" words! (+{outcome.points} pts)"
+            )
+        elif outcome.kind == GuessResult.CORRECT:
+            await message.channel.send(
+                f"**{outcome.username}** got it! (+{outcome.points} pts)"
+            )
 
     # --- Command implementations ---
 
@@ -216,6 +311,7 @@ class DiscordManager(discord.Client):
     HELP_CATEGORIES = {
         "Spotify Data": ["scan", "sync_metadata", "build_playlist", "stats", "genre_cloud"],
         "Music Player": ["play", "playnext", "pause", "shuffle", "clear", "stop"],
+        "Trivia": ["trivia_start", "trivia_skip", "trivia_stop", "trivia_scores"],
     }
 
     async def _help_command(self, interaction: discord.Interaction) -> None:
@@ -605,11 +701,23 @@ class DiscordManager(discord.Client):
             return False
         return True
 
+    async def __check_no_trivia(self, interaction: discord.Interaction) -> bool:
+        """Return True if no trivia game is active; send an error otherwise."""
+        if self.trivia_manager.has_active_game(interaction.guild_id):
+            await interaction.response.send_message(
+                "A trivia game is running. Stop it with /trivia_stop first.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
     async def _play_or_next_command(
         self, interaction: discord.Interaction, query: str, front: bool
     ) -> None:
         """Shared handler for /play and /playnext."""
         if not await self.__check_music_perms(interaction):
+            return
+        if not await self.__check_no_trivia(interaction):
             return
         await interaction.response.defer()
         loop = asyncio.get_running_loop()
@@ -734,6 +842,104 @@ class DiscordManager(discord.Client):
             return
         self.music_manager.clear(interaction.guild_id)
         await interaction.response.send_message("Queue cleared.", ephemeral=True)
+
+    # --- Trivia command implementations ---
+
+    async def _trivia_start_command(
+        self,
+        interaction: discord.Interaction,
+        settings: TriviaSettings,
+    ) -> None:
+        """Start a music trivia game in the user's voice channel."""
+        if not await self.__check_music_perms(interaction):
+            return
+        if self.trivia_manager.has_active_game(interaction.guild_id):
+            await interaction.response.send_message(
+                "A trivia game is already running.", ephemeral=True
+            )
+            return
+        if self.music_manager.is_active(interaction.guild_id):
+            await interaction.response.send_message(
+                "Stop the music player before starting trivia.", ephemeral=True
+            )
+            return
+
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not member.voice or not member.voice.channel:
+            await interaction.response.send_message(
+                "You need to be in a voice channel to start trivia.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        error = await self.trivia_manager.start_game(
+            guild=interaction.guild,
+            channel=interaction.channel,
+            voice_channel=member.voice.channel,
+            settings=settings,
+        )
+        if error:
+            await interaction.followup.send(f"Could not start trivia: {error}", ephemeral=True)
+        else:
+            genre_label = settings.genre or "any genre"
+            await interaction.followup.send(
+                f"Trivia started! {settings.rounds} round(s) · genre: {genre_label} · "
+                f"mode: {settings.end_mode}",
+                ephemeral=True,
+            )
+
+    async def _trivia_skip_command(self, interaction: discord.Interaction) -> None:
+        """Skip to the next trivia round."""
+        if not await self.__check_music_perms(interaction):
+            return
+        if not self.trivia_manager.has_active_game(interaction.guild_id):
+            await interaction.response.send_message(
+                "No trivia game is running.", ephemeral=True
+            )
+            return
+        await self.trivia_manager.skip(interaction.guild_id)
+        await interaction.response.send_message("Skipping to the next round.", ephemeral=True)
+
+    async def _trivia_stop_command(self, interaction: discord.Interaction) -> None:
+        """Stop the current trivia game early."""
+        if not await self.__check_music_perms(interaction):
+            return
+        if not self.trivia_manager.has_active_game(interaction.guild_id):
+            await interaction.response.send_message(
+                "No trivia game is running.", ephemeral=True
+            )
+            return
+        await self.trivia_manager.stop_game(interaction.guild_id)
+        await interaction.response.send_message("Trivia game stopped.", ephemeral=True)
+
+    async def _trivia_scores_command(
+        self, interaction: discord.Interaction, days: int
+    ) -> None:
+        """Show the trivia leaderboard."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            results = self.stats_manager.top_trivia_scores(days=days)
+        except Exception:  # pylint: disable=broad-except
+            self.logger.exception("DB error fetching trivia scores")
+            await interaction.followup.send(
+                "Database error fetching trivia scores.", ephemeral=True
+            )
+            return
+        if not results:
+            period_label = "all time" if days == 0 else f"the last {days} day(s)"
+            await interaction.followup.send(
+                f"No trivia scores found for {period_label}.", ephemeral=True
+            )
+            return
+        period_label = "All time" if days == 0 else f"Last {days} day(s)"
+        embed = discord.Embed(
+            title=f"Trivia Leaderboard — {period_label}", color=discord.Color.gold()
+        )
+        lines = []
+        for rank, (username, total) in enumerate(results, 1):
+            lines.append(f"**{rank}.** {username} — {total:,} pts")
+        embed.description = "\n".join(lines)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- Discord object serialisation helpers ---
 

@@ -10,6 +10,7 @@ from db_manager import DBManager
 from music_manager import MusicManager, MusicManagerSettings
 from spotify_manager import SpotifyManager, SpotifyManagerSettings
 from stats_manager import StatsManager
+from trivia_manager import TriviaManager
 from discord_manager import DiscordManager, DiscordManagerDeps, DiscordManagerSettings
 
 # --- Load environment variables ---
@@ -63,12 +64,19 @@ music_manager = MusicManager(
     settings=MusicManagerSettings(dj_role_name=MUSIC_DJ_ROLE_NAME),
 )
 
+trivia_manager = TriviaManager(
+    db=db,
+    spotify=spotify_manager,
+    music=music_manager,
+)
+
 discord_manager = DiscordManager(
     deps=DiscordManagerDeps(
         db=db,
         spotify_manager=spotify_manager,
         stats_manager=stats_manager,
         music_manager=music_manager,
+        trivia_manager=trivia_manager,
     ),
     discord_settings=DiscordManagerSettings(
         target_channel=TARGET_CHANNEL_NAME,

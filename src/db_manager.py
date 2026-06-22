@@ -126,6 +126,17 @@ class TrackShare(Base):
     message: Mapped["Message"] = relationship(back_populates="track_shares")
     track: Mapped["Track"] = relationship(back_populates="shares")
 
+class TriviaScore(Base):
+    """Trivia analytics fact: one row per user per completed trivia game."""
+    __tablename__ = "trivia_scores"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("discord_users.id"), nullable=False)
+    guild_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    points: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
 # --- Data transfer objects ---
 @dataclass
 class MessageRecord:
@@ -363,3 +374,15 @@ class DBManager:
                     source_type=source_type,
                     source_id=source_id,
                 ))
+
+    def record_trivia_score(
+        self,
+        user_id: int,
+        guild_id: int,
+        points: int,
+        username: str,
+    ) -> None:
+        """Record a user's final score from a completed trivia game."""
+        self.get_or_create_discord_user(user_id, username)
+        with self.session() as s:
+            s.add(TriviaScore(user_id=user_id, guild_id=guild_id, points=points))

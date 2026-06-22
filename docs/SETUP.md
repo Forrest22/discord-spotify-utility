@@ -81,6 +81,17 @@ all available commands. The typical flow is:
 2. `/sync_metadata` — enrich them with track, artist, and genre info
 3. `/stats` or `/genre_cloud` — see what you've been listening to
 
+### Music trivia
+
+Join a voice channel and run `/trivia_start` to kick off a game. The bot joins your channel
+and plays songs — type your guesses right in the text channel. Faster, more complete guesses
+score more points (500 max in the first 5 seconds, decaying to a floor of 100 over 60 seconds).
+
+- `/trivia_start genre:rock rounds:5` — start a game (genre and round count are optional)
+- `/trivia_skip` — skip the current song
+- `/trivia_stop` — end the game early
+- `/trivia_scores` — show the leaderboard (pass `days:0` for all-time)
+
 ## Linting
 
 ```bash

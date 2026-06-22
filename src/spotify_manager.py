@@ -1,6 +1,7 @@
 """Wrapper Class for using spotipy"""
 from dataclasses import dataclass
 import logging
+import random
 from typing import List, Any, Set
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -207,6 +208,38 @@ class SpotifyManager:
             else:
                 raise
         return pairs
+
+    def get_genre_track_pool(
+        self, genre: str, n: int = 20
+    ) -> list[tuple[str, str]]:
+        """Return up to n (title, primary_artist) pairs for trivia playback.
+
+        genre='' or 'all' falls back to a broad cross-genre search.
+        Results are shuffled for variety. Blocking — call via run_in_executor.
+        Up to 50 tracks can be fetched in one Spotify API call; n is capped there.
+        """
+        if genre and genre.lower() != "all":
+            query = f'genre:"{genre}"'
+        else:
+            query = "year:1980-2024"
+
+        limit = min(n, 50)
+        try:
+            results = self.spotipy.search(q=query, type="track", limit=limit)
+        except spotipy.SpotifyException as e:
+            self.logger.warning("Spotify genre search failed for '%s': %s", genre, e)
+            return []
+
+        items = (results.get("tracks") or {}).get("items") or []
+        pairs: list[tuple[str, str]] = []
+        for t in items:
+            if not t or not t.get("id"):
+                continue
+            artist = t["artists"][0]["name"] if t.get("artists") else ""
+            pairs.append((t["name"], artist))
+
+        random.shuffle(pairs)
+        return pairs[:n]
 
     # --- Private helpers ---
 
