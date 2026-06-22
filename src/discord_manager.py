@@ -41,17 +41,15 @@ class ConfirmView(discord.ui.View):
             await self.message.edit(content="Request timed out.", embed=None, view=None)
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         """Mark as confirmed and defer the button interaction."""
-        # pylint: disable=unused-argument
         self.confirmed = True
         self.stop()
         await interaction.response.defer()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         """Stop the view and edit the message to show cancellation."""
-        # pylint: disable=unused-argument
         self.stop()
         await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
 
@@ -214,15 +212,33 @@ class DiscordManager(discord.Client):
 
     # --- Command implementations ---
 
+    # Maps each command to a help category; commands absent here fall into "Other".
+    HELP_CATEGORIES = {
+        "Spotify Data": ["scan", "sync_metadata", "build_playlist", "stats", "genre_cloud"],
+        "Music Player": ["play", "playnext", "pause", "shuffle", "clear", "stop"],
+    }
+
     async def _help_command(self, interaction: discord.Interaction) -> None:
-        """Auto-generate the help embed from the registered command tree."""
-        embed = discord.Embed(
-            title="Bot Commands",
-            description="Here are the available commands:",
-            color=discord.Color.blurple(),
-        )
-        for cmd in sorted(self.tree.get_commands(), key=lambda c: c.name):
-            embed.add_field(name=f"/{cmd.name}", value=cmd.description, inline=False)
+        """Generate the help embed, grouping every registered command by category.
+
+        Categories give ordering/labels, but the command list is driven by the live
+        command tree so a newly added command always appears — uncategorized ones
+        land in an "Other" group rather than being silently dropped.
+        """
+        cmd_map = {cmd.name: cmd for cmd in self.tree.get_commands()}
+        categorized = {name for names in self.HELP_CATEGORIES.values() for name in names}
+        grouped = {
+            category: [name for name in names if name in cmd_map]
+            for category, names in self.HELP_CATEGORIES.items()
+        }
+        grouped["Other"] = sorted(name for name in cmd_map if name not in categorized)
+
+        embed = discord.Embed(title="Bot Commands", color=discord.Color.blurple())
+        for category, names in grouped.items():
+            if not names:
+                continue
+            lines = [f"`/{name}` — {cmd_map[name].description}" for name in names]
+            embed.add_field(name=f"── {category} ──", value="\n".join(lines), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _scan(
@@ -633,6 +649,59 @@ class DiscordManager(discord.Client):
         else:
             added = f"✅ Added {len(result.tracks)} tracks to the queue."
         await msg.edit(content=added, embed=None, view=None)
+        await self.__record_played_link(interaction, query)
+
+    async def __record_played_link(
+        self, interaction: discord.Interaction, query: str
+    ) -> None:
+        """Record a confirmed Spotify-URL play to the DB so it feeds /stats and /genre_cloud.
+
+        Mirrors the recording block in __run_scan. No-ops silently for free-text /
+        YouTube queries (no Spotify URL to extract) and for non-text-channel contexts.
+        A DB error is logged but never propagates — a hiccup must not interrupt playback.
+        """
+        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+            return
+
+        matches = self.SPOTIFY_URL_PATTERN.findall(query)
+        if not matches:
+            return  # free-text / YouTube query — nothing to record
+
+        try:
+            self.db.get_or_create_guild(
+                guild_id=interaction.guild.id,
+                name=interaction.guild.name,
+                raw_data=_guild_to_dict(interaction.guild),
+            )
+            self.db.get_or_create_channel(
+                channel_id=interaction.channel.id,
+                guild_id=interaction.guild.id,
+                name=interaction.channel.name,
+                raw_data=_channel_to_dict(interaction.channel),
+            )
+            self.db.get_or_create_discord_user(
+                user_id=interaction.user.id,
+                username=interaction.user.name,
+                raw_data=_user_to_dict(interaction.user),
+            )
+            self.db.record_message(MessageRecord(
+                message_id=interaction.id,
+                channel_id=interaction.channel.id,
+                author_id=interaction.user.id,
+                content=query,
+                created_at=interaction.created_at,
+                raw_data={"source": "play_command", "query": query},
+                spotify_urls=[remove_query_params(u) for u in matches],
+            ))
+            self.logger.info(
+                "Recorded played link(s) %s for user %s (interaction %s)",
+                matches, interaction.user.id, interaction.id,
+            )
+        except SQLAlchemyError:
+            self.logger.exception(
+                "DB error recording played link for interaction %s — playback unaffected",
+                interaction.id,
+            )
 
     async def _pause_command(self, interaction: discord.Interaction) -> None:
         """Toggle pause/resume for the current track."""

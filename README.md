@@ -1,19 +1,32 @@
 # discord-spotify-utility
 
-This is a Discord Bot for use in discord channels with music bots. Its goal is to help collect playlists that were used to play music via bot commands and consolidate individual songs, albums, and playlists into other playlists. I also have hopes for the future to do some data analysis and/or visualization on the music. It would also be nice to make this a utility tool for managing discord music (it could play the music too?). Maybe I could do a music trivia game where I play a few seconds of each song and we're supposed to guess the song.
+I built this to make sense of all the music my friends and I throw into our Discord
+server. It quietly collects the Spotify links we share, figures out what they actually
+are, and lets us look back at our top songs, artists, and genres — and it can play them
+in voice, too.
 
-## Relevant Libraries and References
+## What it does
 
-- [Spotify for Developer](https://developer.spotify.com/)
+- Scans the channel and remembers every Spotify link we drop
+- Looks each one up so it knows the track, artist, album, and genre
+- Shows us our most-played songs, albums, and artists
+- Renders a genre word cloud so we can see what we're really into
+- Plays music right in the voice channel when we want a DJ
+- Bundles it all into a Spotify playlist whenever we feel like it
+
+## Down the road
+
+A music trivia game is still on my wishlist — play a few seconds of a song and everyone
+races to guess it.
+
+## Relevant libraries and references
+
+- [Spotify for Developers](https://developer.spotify.com/)
 - [Spotipy](https://spotipy.readthedocs.io/)
 - [Discord Developer Portal](https://discord.com/developers/applications)
 - [Discord Developer Docs](https://docs.discord.com/developers/intro)
 - [discord.py](https://discordpy.readthedocs.io/en/latest/)
 
-## Development Notes
+## Setup
 
-`source venv/bin/activate` to activate the venv
-
-`venv/bin/pip install <LIBRARY>` to add a lib
-
-`python3 $(which pylint) src` to run pylint using venv
+Full setup steps and credential guide live in [docs/SETUP.md](docs/SETUP.md).
