@@ -242,19 +242,25 @@ class MusicManager:
             return
 
         track: QueuedTrack | None = None
+        empty_channel = False
         async with player.lock:
             if player.leaving or not player.voice_client.is_connected():
                 return
             if player.voice_client.is_playing() or player.voice_client.is_paused():
                 return  # after-callback is already managing the queue
-            if not player.queue:
+            humans = [m for m in player.voice_client.channel.members if not m.bot]
+            if not humans:
+                empty_channel = True
+            elif not player.queue:
                 player.current = None
             else:
                 track = player.queue.popleft()
                 player.current = track
 
-        if track is None:
-            # Queue drained — idle-leave
+        if empty_channel or track is None:
+            # Leave: either no human listeners remain, or the queue is drained
+            if empty_channel:
+                self.logger.info("Voice channel empty in guild %s — leaving", guild_id)
             await player.voice_client.disconnect()
             self._players.pop(guild_id, None)
             return
