@@ -281,7 +281,14 @@ class MusicManager:
                 self.logger.error("Trivia playback error in guild %s: %s", guild_id, err)
             on_finished()
 
-        player.voice_client.play(source, after=_after)
+        try:
+            player.voice_client.play(source, after=_after)
+        except discord.ClientException as err:
+            self.logger.error(
+                "Trivia: play() called while already playing in guild %s: %s", guild_id, err
+            )
+            on_finished()
+            return
         self.logger.info("Trivia: now playing in guild %s: %s", guild_id, search_query)
 
     async def stop_current(self, guild_id: int) -> None:
@@ -295,7 +302,7 @@ class MusicManager:
     # --- Private playback internals ---
 
     async def _play_next(self, guild_id: int) -> None:
-        """Advance to the next queued track.
+        """Advance to the next queued track, skipping any that fail to resolve.
 
         Acquires the per-guild lock to guard queue mutations and playback
         transitions. Guards against double-advance and stop races via the
@@ -306,60 +313,61 @@ class MusicManager:
         if not player:
             return
 
-        track: QueuedTrack | None = None
-        empty_channel = False
-        async with player.lock:
+        loop = asyncio.get_running_loop()
+        while True:
+            track: QueuedTrack | None = None
+            empty_channel = False
+            async with player.lock:
+                if player.leaving or not player.voice_client.is_connected():
+                    return
+                if player.voice_client.is_playing() or player.voice_client.is_paused():
+                    return  # after-callback is already managing the queue
+                humans = [m for m in player.voice_client.channel.members if not m.bot]
+                if not humans:
+                    empty_channel = True
+                elif not player.queue:
+                    player.current = None
+                else:
+                    track = player.queue.popleft()
+                    player.current = track
+
+            if empty_channel or track is None:
+                # Leave: either no human listeners remain, or the queue is drained
+                if empty_channel:
+                    self.logger.info("Voice channel empty in guild %s — leaving", guild_id)
+                await player.voice_client.disconnect()
+                self._players.pop(guild_id, None)
+                return
+
+            # Lazily resolve the stream URL outside the lock (blocking yt-dlp call)
+            try:
+                stream_url = await loop.run_in_executor(
+                    None, self._get_stream_url, track.search_query
+                )
+            except Exception as err:  # pylint: disable=broad-except
+                self.logger.error("Failed to resolve stream for '%s': %s", track.title, err)
+                continue  # skip this track and try the next one without growing the stack
+
+            # Guard against a /stop that arrived while we were resolving
             if player.leaving or not player.voice_client.is_connected():
                 return
-            if player.voice_client.is_playing() or player.voice_client.is_paused():
-                return  # after-callback is already managing the queue
-            humans = [m for m in player.voice_client.channel.members if not m.bot]
-            if not humans:
-                empty_channel = True
-            elif not player.queue:
-                player.current = None
-            else:
-                track = player.queue.popleft()
-                player.current = track
 
-        if empty_channel or track is None:
-            # Leave: either no human listeners remain, or the queue is drained
-            if empty_channel:
-                self.logger.info("Voice channel empty in guild %s — leaving", guild_id)
-            await player.voice_client.disconnect()
-            self._players.pop(guild_id, None)
-            return
-
-        # Lazily resolve the stream URL outside the lock (blocking yt-dlp call)
-        loop = asyncio.get_running_loop()
-        try:
-            stream_url = await loop.run_in_executor(
-                None, self._get_stream_url, track.search_query
+            loudness = self._settings.loudness_i
+            before_opts = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+            audio_opts = f"-vn -af loudnorm=I={loudness}:TP=-1.5:LRA=11,aresample=48000"
+            source = discord.FFmpegOpusAudio(
+                stream_url, before_options=before_opts, options=audio_opts
             )
-        except Exception as err:  # pylint: disable=broad-except
-            self.logger.error("Failed to resolve stream for '%s': %s", track.title, err)
-            await self._play_next(guild_id)
+
+            def _after(err: Exception | None) -> None:
+                if err:
+                    self.logger.error("Playback error in guild %s: %s", guild_id, err)
+                if self._loop:
+                    asyncio.run_coroutine_threadsafe(self._play_next(guild_id), self._loop)
+
+            player.voice_client.play(source, after=_after)
+            self.logger.info("Now playing in guild %s: %s", guild_id, track.title)
             return
-
-        # Guard against a /stop that arrived while we were resolving
-        if player.leaving or not player.voice_client.is_connected():
-            return
-
-        loudness = self._settings.loudness_i
-        before_opts = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-        audio_opts = f"-vn -af loudnorm=I={loudness}:TP=-1.5:LRA=11,aresample=48000"
-        source = discord.FFmpegOpusAudio(
-            stream_url, before_options=before_opts, options=audio_opts
-        )
-
-        def _after(err: Exception | None) -> None:
-            if err:
-                self.logger.error("Playback error in guild %s: %s", guild_id, err)
-            if self._loop:
-                asyncio.run_coroutine_threadsafe(self._play_next(guild_id), self._loop)
-
-        player.voice_client.play(source, after=_after)
-        self.logger.info("Now playing in guild %s: %s", guild_id, track.title)
 
     def _get_stream_url(self, search_query: str) -> str:
         """Resolve a search query to a direct audio stream URL. Blocking."""

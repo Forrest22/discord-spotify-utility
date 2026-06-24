@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -325,15 +326,8 @@ class TriviaManager:
         """Set up, play, and score a single round."""
         title, artist = game.pool[idx]
 
-        game.progress.current_round = TriviaRound(
-            target_words=normalize_words(f"{title} {artist}"),
-            total_words=0,
-            claimed=set(),
-            round_start=time.monotonic(),
-            round_scores={},
-            last_guess={},
-        )
-        game.progress.current_round.total_words = len(game.progress.current_round.target_words)
+        # Precompute target words so they're ready the moment audio starts.
+        target_words = normalize_words(f"{title} {artist}")
         game.sync.advance_event.clear()
         game.sync.finished_event.clear()
 
@@ -343,15 +337,33 @@ class TriviaManager:
 
         loop = asyncio.get_running_loop()
         finished_ev = game.sync.finished_event
+        _fired = threading.Lock()
 
         def _on_finished(
             _loop: asyncio.AbstractEventLoop = loop,
             _ev: asyncio.Event = finished_ev,
+            _flag: threading.Lock = _fired,
         ) -> None:
-            _loop.call_soon_threadsafe(_ev.set)
+            # One-shot: the first caller (natural end) fires the event;
+            # the second caller (stop_current's _after) finds the lock taken
+            # and returns, preventing finished_event from being pre-set for
+            # the next round.
+            if _flag.acquire(blocking=False):
+                _loop.call_soon_threadsafe(_ev.set)
 
         await self._music.play_track(
             game.guild_id, f"ytsearch1:{title} {artist}", on_finished=_on_finished
+        )
+        # Stamp round_start after play_track returns (audio is now playing).
+        # Keeping current_round=None until here means submit_guess ignores any
+        # guesses typed during yt-dlp resolution, and elapsed scores are accurate.
+        game.progress.current_round = TriviaRound(
+            target_words=target_words,
+            total_words=len(target_words),
+            claimed=set(),
+            round_start=time.monotonic(),
+            round_scores={},
+            last_guess={},
         )
         await self._wait_for_round_end(game)
         await self._music.stop_current(game.guild_id)
@@ -380,7 +392,7 @@ class TriviaManager:
         self, game: TriviaGame, channel: discord.TextChannel
     ) -> bool:
         """Post a notice and return True if a player has hit the max_score threshold."""
-        if not game.settings.max_score:
+        if game.settings.max_score is None:
             return False
         leader = max(game.progress.game_scores.values(), default=0)
         if leader >= game.settings.max_score:

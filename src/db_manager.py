@@ -126,6 +126,7 @@ class TrackShare(Base):
     message: Mapped["Message"] = relationship(back_populates="track_shares")
     track: Mapped["Track"] = relationship(back_populates="shares")
 
+
 class TriviaScore(Base):
     """Trivia analytics fact: one row per user per completed trivia game."""
     __tablename__ = "trivia_scores"

@@ -575,9 +575,10 @@ class DiscordManager(discord.Client):
         await interaction.edit_original_response(
             content="🔄 Syncing metadata… this may take a few minutes for large channels."
         )
-        loop = asyncio.get_event_loop()
         try:
-            result = await loop.run_in_executor(None, self.spotify_manager.sync_metadata)
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, self.spotify_manager.sync_metadata
+            )
         except spotipy.SpotifyException as e:
             self.logger.exception("Spotify error during sync: %s", e)
             await interaction.edit_original_response(
@@ -657,8 +658,7 @@ class DiscordManager(discord.Client):
             return
 
         out_path = Path(__file__).parent.parent / "storage" / f"genre_cloud_{period}.png"
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, render_genre_cloud, freqs, out_path)
+        await asyncio.get_running_loop().run_in_executor(None, render_genre_cloud, freqs, out_path)
 
         period_label = period.capitalize() if period != "all" else "All time"
         embed = discord.Embed(
@@ -775,35 +775,43 @@ class DiscordManager(discord.Client):
         if not matches:
             return  # free-text / YouTube query — nothing to record
 
-        try:
-            self.db.get_or_create_guild(
-                guild_id=interaction.guild.id,
-                name=interaction.guild.name,
-                raw_data=_guild_to_dict(interaction.guild),
-            )
+        # Extract all data from Discord objects here — they must not be accessed
+        # from the executor thread.
+        guild_id = interaction.guild.id
+        guild_name = interaction.guild.name
+        guild_raw = _guild_to_dict(interaction.guild)
+        channel_id = interaction.channel.id
+        channel_name = interaction.channel.name
+        channel_raw = _channel_to_dict(interaction.channel)
+        user_id = interaction.user.id
+        username = interaction.user.name
+        user_raw = _user_to_dict(interaction.user)
+        record = MessageRecord(
+            message_id=interaction.id,
+            channel_id=channel_id,
+            author_id=user_id,
+            content=query,
+            created_at=interaction.created_at,
+            raw_data={"source": "play_command", "query": query},
+            spotify_urls=[remove_query_params(u) for u in matches],
+        )
+
+        def _write() -> None:
+            self.db.get_or_create_guild(guild_id=guild_id, name=guild_name, raw_data=guild_raw)
             self.db.get_or_create_channel(
-                channel_id=interaction.channel.id,
-                guild_id=interaction.guild.id,
-                name=interaction.channel.name,
-                raw_data=_channel_to_dict(interaction.channel),
+                channel_id=channel_id, guild_id=guild_id,
+                name=channel_name, raw_data=channel_raw,
             )
             self.db.get_or_create_discord_user(
-                user_id=interaction.user.id,
-                username=interaction.user.name,
-                raw_data=_user_to_dict(interaction.user),
+                user_id=user_id, username=username, raw_data=user_raw,
             )
-            self.db.record_message(MessageRecord(
-                message_id=interaction.id,
-                channel_id=interaction.channel.id,
-                author_id=interaction.user.id,
-                content=query,
-                created_at=interaction.created_at,
-                raw_data={"source": "play_command", "query": query},
-                spotify_urls=[remove_query_params(u) for u in matches],
-            ))
+            self.db.record_message(record)
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _write)
             self.logger.info(
                 "Recorded played link(s) %s for user %s (interaction %s)",
-                matches, interaction.user.id, interaction.id,
+                matches, user_id, interaction.id,
             )
         except SQLAlchemyError:
             self.logger.exception(
@@ -942,6 +950,7 @@ class DiscordManager(discord.Client):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- Discord object serialisation helpers ---
+
 
 def _guild_to_dict(guild: discord.Guild) -> dict:
     return {
